@@ -1,0 +1,26 @@
+# Deploy from this folder only:
+#   cd micah-realtime-bridge && fly deploy
+#
+# First time:
+#   fly launch --no-deploy --copy-config   # or: fly apps create micah-bridge
+#   fly secrets set OPENAI_API_KEY=sk-... SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=...
+#   fly secrets set MICAH_BRIDGE_SECRET=your-random-secret
+#   fly deploy
+
+app = "micah-bridge"
+primary_region = "syd"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

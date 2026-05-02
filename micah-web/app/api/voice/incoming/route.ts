@@ -1,64 +1,35 @@
-/**
- * Twilio Voice webhook — conversational loop via `<Gather speech>` → `/api/voice/process`.
- * Incoming never requires OpenAI/Supabase for TwiML; `/process` validates keys and returns spoken errors as 200.
- */
+import twilio from "twilio";
+import type { NextRequest } from "next/server";
 import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
-import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
-import { micahSayLine } from "@/lib/micah/twilio-voice";
-import { getTenantVoiceConfigByInboundDid } from "@/lib/micah/tenant-config";
+import { MICAH_SAY_LANGUAGE, micahSayAttributes } from "@/lib/micah/twilio-voice";
 import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
-import { escapeXml } from "@/lib/twiml";
+import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
+
+type TwilioVR = import("twilio/lib/twiml/VoiceResponse");
+
+const VOICE_ENGINE = process.env.MICAH_VOICE_ENGINE?.trim().toLowerCase() ?? "";
+const STREAM_WSS = process.env.MICAH_MEDIA_STREAM_WSS_URL?.trim() ?? "";
+const BRIDGE_TOKEN = process.env.MICAH_BRIDGE_SECRET?.trim() ?? "";
+
+/** Opening gather — enough time to speak after the greeting. */
+const INCOMING_GATHER_TIMEOUT_SEC = 10;
+
+function formString(form: FormData, key: string): string {
+  const v = form.get(key);
+  return typeof v === "string" ? v.trim() : "";
+}
 
 export const maxDuration = 30;
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function twimlGather(action: string): string {
-  const greeting =
-    "Hey there! I'm Micah — super glad you called. What's going on, and how can I help?";
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${micahSayLine(greeting)}
-  <Gather
-    input="speech"
-    timeout="15"
-    speechTimeout="auto"
-    action="${escapeXml(action)}"
-    method="POST"
-    language="en-AU"
-  >
-    ${micahSayLine("I'm all ears — go ahead.")}
-  </Gather>
-  ${micahSayLine("I'll hang up for now — feel free to call back anytime. Bye!")}
-  <Hangup/>
-</Response>`;
-}
-
-function twimlRecord(action: string): string {
-  const greeting =
-    "Hey! I'm Micah — After the tone, tell me what you need and I'll jump on it.";
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${micahSayLine(greeting)}
-  <Record
-    timeout="10"
-    maxLength="120"
-    playBeep="false"
-    action="${escapeXml(action)}"
-    method="POST"
-    trim="trim-silence"
-  />
-  ${micahSayLine("I didn't get anything — try calling again soon. Bye!")}
-  <Hangup/>
-</Response>`;
-}
-
-/** Browser / uptime sanity check — Twilio uses POST only. */
 export async function GET() {
+  const mode =
+    VOICE_ENGINE === "realtime" || VOICE_ENGINE === "openai-realtime"
+      ? "realtime media stream"
+      : "gather → /api/voice/process";
   return new Response(
-    "Micah voice webhook OK — use POST (Twilio). Deployment reachable.",
+    `POST /api/voice/incoming — Micah (${mode}). TwiML from POST only.`,
     {
       status: 200,
       headers: { "Content-Type": "text/plain; charset=utf-8" },
@@ -66,89 +37,96 @@ export async function GET() {
   );
 }
 
-export async function POST(req: Request): Promise<Response> {
-  console.log("Call Received");
-  console.log("[micah/debug] env snapshot:", {
-    OPENAI: Boolean(process.env.OPENAI_API_KEY?.trim()),
-    SUPABASE_URL: Boolean(
-      process.env.SUPABASE_URL?.trim() || process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
-    ),
-    SUPABASE_SERVICE_ROLE: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()),
-    ELEVENLABS: Boolean(
-      process.env.ELEVENLABS_API_KEY?.trim() && process.env.ELEVENLABS_VOICE_ID?.trim()
-    ),
-    TTS_BUCKET: Boolean(process.env.SUPABASE_TTS_BUCKET?.trim()),
-  });
+export async function POST(request: NextRequest) {
   try {
-    if (!process.env.OPENAI_API_KEY?.trim()) {
-      console.warn("[micah/voice/incoming] OPENAI_API_KEY missing — /process will return configured error TwiML");
-    }
-    if (
-      !process.env.SUPABASE_URL?.trim() &&
-      !process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
-    ) {
-      console.warn(
-        "[micah/voice/incoming] SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL missing — tenant lookup + DB disabled"
-      );
-    }
-
-    let form: FormData | null = null;
+    let form: FormData;
     try {
-      form = await req.formData();
-    } catch (e) {
-      console.error("[micah/voice/incoming] formData parse:", e);
-    }
-
-    const incomingSummary = {
-      CallSid: typeof form?.get("CallSid") === "string" ? form.get("CallSid") : undefined,
-      From: typeof form?.get("From") === "string" ? form.get("From") : undefined,
-      To: typeof form?.get("To") === "string" ? form.get("To") : undefined,
-      AccountSid:
-        typeof form?.get("AccountSid") === "string" ? form.get("AccountSid") : undefined,
-    };
-    console.log("[micah/voice/incoming] request", incomingSummary);
-
-    const base = safeBuildPublicBaseUrl(req);
-    let tenantQuery = "";
-    try {
-      const to = form?.get("To");
-      if (typeof to === "string" && to.length > 0) {
-        const supabase = getServiceSupabaseOrNull();
-        if (supabase) {
-          const tenant = await getTenantVoiceConfigByInboundDid(supabase, to);
-          if (tenant) {
-            tenantQuery = `?tenant_id=${encodeURIComponent(tenant.tenant_id)}`;
-          } else {
-            console.warn(
-              "[micah/voice/incoming] no tenant for this DID — continuing with default Micah greeting (no tenant_id)"
-            );
-          }
-        }
-      }
-    } catch (e) {
-      console.error("[micah/voice/incoming] tenant lookup:", e);
-    }
-
-    const action = `${base}/api/voice/process${tenantQuery}`;
-    const mode = (process.env.MICAH_TWIML_MODE ?? "gather").toLowerCase();
-
-    let twiml: string;
-    try {
-      twiml = mode === "record" ? twimlRecord(action) : twimlGather(action);
-    } catch (e) {
-      console.error("[micah/voice/incoming] twiml build:", e);
+      form = await request.formData();
+    } catch {
       return twimlResponse(
-        plainErrorTwiML("Micah hit a quick glitch building your call. Please try again."),
-        "[micah/voice/incoming] twiml-build-error"
+        plainErrorTwiML(
+          "Hi, it's Micah — I couldn't read that request properly. Please try calling again."
+        ),
+        "[micah/voice/incoming] bad-form"
       );
     }
 
-    return twimlResponse(twiml, "[micah/voice/incoming]");
+    if (!isValidTwilioVoiceWebhook(request, form)) {
+      console.warn("[micah/voice/incoming] invalid Twilio signature");
+      return twimlResponse(
+        plainErrorTwiML(
+          "Hi — I'm having trouble verifying this call. Please hang up and dial again."
+        ),
+        "[micah/voice/incoming] bad-signature"
+      );
+    }
+
+    const useRealtime =
+      VOICE_ENGINE === "realtime" || VOICE_ENGINE === "openai-realtime";
+
+    if (useRealtime) {
+      if (!STREAM_WSS) {
+        return twimlResponse(
+          plainErrorTwiML(
+            "Micah's realtime voice link isn't configured yet — please try again later."
+          ),
+          "[micah/voice/incoming] missing-stream-url"
+        );
+      }
+      let streamUrl = STREAM_WSS;
+      if (BRIDGE_TOKEN && !/[?&]token=/.test(streamUrl)) {
+        streamUrl += `${streamUrl.includes("?") ? "&" : "?"}token=${encodeURIComponent(BRIDGE_TOKEN)}`;
+      }
+
+      const from = formString(form, "From");
+      const to = formString(form, "To");
+
+      const vr = new twilio.twiml.VoiceResponse();
+      const connect = vr.connect();
+      const stream = connect.stream({
+        url: streamUrl,
+        track: "both_tracks",
+      });
+      stream.parameter({ name: "From", value: from });
+      stream.parameter({ name: "To", value: to });
+
+      return new Response(vr.toString(), {
+        status: 200,
+        headers: { "Content-Type": "text/xml; charset=utf-8" },
+      });
+    }
+
+    const base = safeBuildPublicBaseUrl(request);
+    const processUrl = `${base}/api/voice/process`;
+
+    const twiml = new twilio.twiml.VoiceResponse();
+    const gather = twiml.gather({
+      input: ["speech"],
+      timeout: INCOMING_GATHER_TIMEOUT_SEC,
+      speechTimeout: "auto",
+      action: processUrl,
+      method: "POST",
+      language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
+    });
+    gather.say(
+      micahSayAttributes(),
+      "Hi! This is Micah, your AI receptionist. How can I help you today?"
+    );
+    twiml.say(
+      micahSayAttributes(),
+      "I'll hang up for now — feel free to call back when you're ready. Bye!"
+    );
+    twiml.hangup();
+
+    return new Response(twiml.toString(), {
+      status: 200,
+      headers: { "Content-Type": "text/xml; charset=utf-8" },
+    });
   } catch (e) {
     console.error("[micah/voice/incoming] fatal:", e);
     return twimlResponse(
       plainErrorTwiML(
-        "Hi — Micah's having a quick tech moment. Please hang up and try again in a minute."
+        "Hi, it's Micah — I'm having a quick connection hiccup. Please try your call again in a moment."
       ),
       "[micah/voice/incoming] fatal"
     );

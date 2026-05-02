@@ -1,0 +1,16 @@
+# Host-only artefacts (container runs `npm run build` itself)
+node_modules
+dist
+
+# Git / env
+.git
+.gitignore
+.env
+.env.*
+*.log
+npm-debug.log*
+
+# Docs — optional to omit from context
+README.md
+
+# Never exclude Dockerfile or fly.toml — Fly/Docker need them on the host.

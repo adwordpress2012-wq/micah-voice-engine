@@ -1,0 +1,11 @@
+# Shrink build context (repo root is large)
+**/node_modules
+**/.next
+**/dist
+**/.git
+**/.env
+**/.env.*
+!**/.env.example
+**/*.log
+**/coverage
+micah-web/out

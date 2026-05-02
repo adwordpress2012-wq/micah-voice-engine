@@ -1,0 +1,27 @@
+# Dependencies & caches
+node_modules
+npm-debug.log*
+.npm
+.pnpm-store
+
+# Next.js
+.next
+out
+
+# Git / IDE
+.git
+.gitignore
+.DS_Store
+*.log
+
+# Env (inject at runtime / Fly secrets)
+.env
+.env.*
+!.env.example
+
+# Tests / docs (not needed in image)
+coverage
+tmp
+*~
+
+# Do NOT list Dockerfile or fly.toml here — they must stay available to the builder.

@@ -15,7 +15,8 @@
     "openai": "^6.35.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "resend": "^6.12.2"
+    "resend": "^6.12.2",
+    "twilio": "^6.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
