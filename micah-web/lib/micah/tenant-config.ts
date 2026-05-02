@@ -9,37 +9,21 @@ export type TenantVoiceConfig = {
   notification_email: string | null;
 };
 
-/**
- * Loads Micah persona, voice label, and notification email for a tenant row.
- */
-export async function getTenantVoiceConfig(
-  supabase: SupabaseClient,
-  tenantId: string
-): Promise<TenantVoiceConfig | null> {
-  const { data, error } = await supabase
-    .from("tenants")
-    .select("id, agency_name, principal_name, micah_persona, openai_voice, notification_email")
-    .eq("id", tenantId)
-    .maybeSingle();
-
-  if (error) {
-    console.error("getTenantVoiceConfig:", error.message);
-    return null;
-  }
-  if (!data?.id) return null;
+function mapTenantRow(data: Record<string, unknown> | null): TenantVoiceConfig | null {
+  if (!data || typeof data.id !== "string") return null;
 
   const persona =
     typeof data.micah_persona === "string" ? data.micah_persona.trim() : "";
 
   return {
-    tenant_id: data.id as string,
+    tenant_id: data.id,
     agency_name:
-      typeof (data as { agency_name?: unknown }).agency_name === "string"
-        ? ((data as { agency_name: string }).agency_name ?? "").trim() || null
+      typeof data.agency_name === "string"
+        ? data.agency_name.trim() || null
         : null,
     principal_name:
-      typeof (data as { principal_name?: unknown }).principal_name === "string"
-        ? ((data as { principal_name: string }).principal_name ?? "").trim() || null
+      typeof data.principal_name === "string"
+        ? data.principal_name.trim() || null
         : null,
     micah_persona: persona,
     openai_voice:
@@ -54,23 +38,66 @@ export async function getTenantVoiceConfig(
 }
 
 /**
- * Looks up which tenant owns an inbound Twilio number (`To` on the webhook).
- * Uses `inbound_number` (E.164). Override column via TENANT_INBOUND_COLUMN.
+ * Loads agency name, Micah persona, etc. from `tenants` by primary key (Command Centre Portal).
  */
-export async function getTenantIdByInboundNumber(
+export async function getTenantVoiceConfig(
+  supabase: SupabaseClient,
+  tenantId: string
+): Promise<TenantVoiceConfig | null> {
+  const { data, error } = await supabase
+    .from("tenants")
+    .select(
+      "id, agency_name, principal_name, micah_persona, openai_voice, notification_email"
+    )
+    .eq("id", tenantId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getTenantVoiceConfig:", error.message);
+    console.log("[micah/debug] Tenant Lookup Failed");
+    return null;
+  }
+  const row = mapTenantRow(data as Record<string, unknown> | null);
+  if (!row) {
+    console.log("[micah/debug] Tenant Lookup Failed");
+  }
+  return row;
+}
+
+/**
+ * Resolve tenant + persona fields by inbound DID (`To` on Twilio webhook).
+ * Column defaults to `inbound_number` (E.164); override with `TENANT_INBOUND_COLUMN`.
+ */
+export async function getTenantVoiceConfigByInboundDid(
   supabase: SupabaseClient,
   didE164: string
-): Promise<string | null> {
+): Promise<TenantVoiceConfig | null> {
   const column = process.env.TENANT_INBOUND_COLUMN ?? "inbound_number";
   const { data, error } = await supabase
     .from("tenants")
-    .select("id")
+    .select(
+      "id, agency_name, principal_name, micah_persona, openai_voice, notification_email"
+    )
     .eq(column, didE164)
     .maybeSingle();
 
   if (error) {
-    console.error("getTenantIdByInboundNumber:", error.message);
+    console.error("getTenantVoiceConfigByInboundDid:", error.message);
+    console.log("[micah/debug] Tenant Lookup Failed");
     return null;
   }
-  return (data?.id as string) ?? null;
+  const row = mapTenantRow(data as Record<string, unknown> | null);
+  if (!row) {
+    console.log("[micah/debug] Tenant Lookup Failed");
+  }
+  return row;
+}
+
+/** Returns only tenant id (same inbound lookup as {@link getTenantVoiceConfigByInboundDid}). */
+export async function getTenantIdByInboundNumber(
+  supabase: SupabaseClient,
+  didE164: string
+): Promise<string | null> {
+  const row = await getTenantVoiceConfigByInboundDid(supabase, didE164);
+  return row?.tenant_id ?? null;
 }

@@ -1,5 +1,6 @@
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { getStorageObjectPublicUrl } from "@/lib/micah/supabase-storage-url";
 
 const DEFAULT_MODEL = "eleven_multilingual_v2";
 
@@ -20,14 +21,18 @@ async function readableStreamToBuffer(stream: ReadableStream<Uint8Array>): Promi
 }
 
 /**
- * ElevenLabs TTS → MP3 upload to Supabase public bucket for Twilio `<Play>`.
- * Returns null if env, Supabase, or synthesis fails (caller should use Polly `<Say>`).
+ * ElevenLabs TTS → MP3 upload via **service-role** Supabase client (`SUPABASE_SERVICE_ROLE_KEY`).
+ * Bucket name: **only** `SUPABASE_TTS_BUCKET`. Public URL: `getPublicUrl` or `SUPABASE_STORAGE_PUBLIC_URL_BASE`.
  */
 export async function elevenLabsTtsPublicMp3Url(
   supabase: SupabaseClient | null,
   text: string,
   callSid: string
 ): Promise<string | null> {
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) {
+    console.warn("[micah/elevenlabs] SUPABASE_SERVICE_ROLE_KEY missing — cannot upload to Storage");
+    return null;
+  }
   const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
   const voiceId = process.env.ELEVENLABS_VOICE_ID?.trim();
   if (!apiKey || !voiceId) {
@@ -39,6 +44,7 @@ export async function elevenLabsTtsPublicMp3Url(
   }
   const bucket = process.env.SUPABASE_TTS_BUCKET?.trim();
   if (!bucket) {
+    console.warn("[micah/elevenlabs] SUPABASE_TTS_BUCKET missing");
     return null;
   }
 
@@ -60,7 +66,7 @@ export async function elevenLabsTtsPublicMp3Url(
       console.warn("[micah/elevenlabs] empty audio stream");
       return null;
     }
-    const path = `micah-tts/${callSid}/${Date.now()}.mp3`;
+    const path = `voice/${callSid}/${Date.now()}.mp3`;
     const { error: upErr } = await supabase.storage.from(bucket).upload(path, buf, {
       contentType: "audio/mpeg",
       upsert: true,
@@ -70,8 +76,7 @@ export async function elevenLabsTtsPublicMp3Url(
       return null;
     }
 
-    const { data } = supabase.storage.from(bucket).getPublicUrl(path);
-    return data.publicUrl || null;
+    return getStorageObjectPublicUrl(supabase, bucket, path);
   } catch (e) {
     console.error("[micah/elevenlabs] TTS:", e);
     return null;

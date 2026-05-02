@@ -5,7 +5,7 @@
 import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { micahSayLine } from "@/lib/micah/twilio-voice";
-import { getTenantIdByInboundNumber } from "@/lib/micah/tenant-config";
+import { getTenantVoiceConfigByInboundDid } from "@/lib/micah/tenant-config";
 import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
 import { escapeXml } from "@/lib/twiml";
 
@@ -31,6 +31,29 @@ function twimlGather(action: string): string {
     ${micahSayLine("I'm all ears — go ahead.")}
   </Gather>
   ${micahSayLine("I'll hang up for now — feel free to call back anytime. Bye!")}
+  <Hangup/>
+</Response>`;
+}
+
+/** When no `tenants` row matches inbound DID — keeps caller on the line with a generic Syla greeting (200 OK). */
+function twimlGatherFallback(action: string): string {
+  const greeting =
+    "Hi — you've reached Directive OS. I'm Micah. How can I help you today?";
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  ${micahSayLine(greeting)}
+  <Gather
+    input="speech"
+    timeout="15"
+    speechTimeout="auto"
+    action="${escapeXml(action)}"
+    method="POST"
+    language="en-AU"
+  >
+    ${micahSayLine("Go ahead whenever you're ready.")}
+  </Gather>
+  ${micahSayLine("I'll hang up — feel free to call back. Goodbye.")}
   <Hangup/>
 </Response>`;
 }
@@ -104,9 +127,15 @@ export async function POST(req: Request): Promise<Response> {
       if (typeof to === "string" && to.length > 0) {
         const supabase = getServiceSupabaseOrNull();
         if (supabase) {
-          const id = await getTenantIdByInboundNumber(supabase, to);
-          if (id) {
-            tenantQuery = `?tenant_id=${encodeURIComponent(id)}`;
+          const tenant = await getTenantVoiceConfigByInboundDid(supabase, to);
+          if (tenant) {
+            tenantQuery = `?tenant_id=${encodeURIComponent(tenant.tenant_id)}`;
+          } else {
+            const actionFallback = `${base}/api/voice/process`;
+            return twimlResponse(
+              twimlGatherFallback(actionFallback),
+              "[micah/voice/incoming] tenant-not-found-fallback"
+            );
           }
         }
       }

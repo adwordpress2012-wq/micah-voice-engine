@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { MICAH_OPENAI_VOICE, MICAH_SPEECH_SPEED } from "@/lib/micah/master-prompt-v2";
+import { getStorageObjectPublicUrl } from "@/lib/micah/supabase-storage-url";
 
 /**
  * OpenAI Speech — voice \`cedar\`, speed exactly 1.0.
@@ -36,7 +37,7 @@ export async function cedarTtsPublicMp3Url(
     });
 
     const buf = Buffer.from(await speech.arrayBuffer());
-    const path = `micah-tts/${callSid}/${Date.now()}.mp3`;
+    const path = `voice/${callSid}/${Date.now()}.mp3`;
     const { error: upErr } = await supabase.storage.from(bucket).upload(path, buf, {
       contentType: "audio/mpeg",
       upsert: true,
@@ -46,8 +47,7 @@ export async function cedarTtsPublicMp3Url(
       return null;
     }
 
-    const { data } = supabase.storage.from(bucket).getPublicUrl(path);
-    return data.publicUrl || null;
+    return getStorageObjectPublicUrl(supabase, bucket, path);
   } catch (e) {
     console.error("cedar TTS:", e);
     return null;
