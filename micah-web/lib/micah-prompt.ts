@@ -9,14 +9,12 @@ You help with enquiries, inspections, rough availability, and next steps; you do
 If you do not know a fact, say you will have a human specialist follow up. Never claim to be human.`;
 
 /**
- * Canonical HTTPS URL for Twilio action URLs. Prefer `NEXT_PUBLIC_APP_URL`
- * (e.g. https://micah.directiveos.com.au). Otherwise derives from the inbound
- * request (Vercel custom domains set `Host` / `x-forwarded-host`).
+ * Canonical HTTPS URL for Twilio `<Record>` / `<Gather>` action attributes.
+ * When `req` is present (Twilio webhooks), uses `Host` / `x-forwarded-host` first
+ * so custom domains (e.g. micah.directiveos.com.au) match the URL Twilio called.
+ * Falls back to `NEXT_PUBLIC_APP_URL` when no usable host (e.g. some local runs).
  */
 export function buildPublicBaseUrl(req?: Pick<Request, "headers">): string {
-  const explicit = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "");
-  if (explicit) return explicit;
-
   if (req?.headers) {
     const host =
       req.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ??
@@ -28,6 +26,9 @@ export function buildPublicBaseUrl(req?: Pick<Request, "headers">): string {
       return `${proto}://${host}`;
     }
   }
+
+  const explicit = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "");
+  if (explicit) return explicit;
 
   const vercel = process.env.VERCEL_URL;
   if (vercel) return `https://${vercel.replace(/^https?:\/\//, "")}`;
