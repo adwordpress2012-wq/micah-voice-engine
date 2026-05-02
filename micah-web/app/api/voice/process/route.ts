@@ -1,8 +1,13 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
+import { cedarTtsPublicMp3Url } from "@/lib/micah/cedar-tts";
+import {
+  MICAH_OPENAI_VOICE,
+  buildMasterSystemPromptV2,
+} from "@/lib/micah/master-prompt-v2";
 import { getTenantVoiceConfig } from "@/lib/micah/tenant-config";
-import { MICAH_SYSTEM_PROMPT, buildPublicBaseUrl } from "@/lib/micah-prompt";
+import { buildPublicBaseUrl } from "@/lib/micah-prompt";
 import { escapeXml } from "@/lib/twiml";
 import { loadHistory, saveTurnToLead } from "@/lib/voice-session";
 
@@ -33,26 +38,43 @@ async function transcribeOpenAI(
   const buf = await fetchRecordingBytes(recordingUrl);
   const blob = new Blob([buf], { type: "audio/wav" });
   const file = new File([blob], `${callSid}.wav`, { type: "audio/wav" });
+  const model = process.env.OPENAI_TRANSCRIBE_MODEL ?? "whisper-1";
+  const forceEnglishOnly = process.env.MICAH_STT_MULTILINGUAL === "false";
+  const fixedLang = process.env.OPENAI_TRANSCRIBE_LANGUAGE?.trim();
   const tr = await openai.audio.transcriptions.create({
     file,
-    model: process.env.OPENAI_TRANSCRIBE_MODEL ?? "whisper-1",
+    model,
+    // Default: omit language → automatic / multilingual-friendly transcription.
+    ...(forceEnglishOnly && fixedLang ? { language: fixedLang } : {}),
+    prompt:
+      process.env.OPENAI_TRANSCRIBE_PROMPT ??
+      "Transcribe faithfully. Audio may be multilingual or code-switched with English.",
   });
   return tr.text.trim();
 }
 
-function continuationTwiml(assistantSpoken: string, actionUrl: string): string {
+function continuationTwiml(params: {
+  assistantPlayUrl: string | null;
+  assistantFallbackText: string;
+  actionUrl: string;
+}): string {
   const mode = (process.env.MICAH_TWIML_MODE ?? "record").toLowerCase();
   const prompt =
     "Anything else on sheds, zoning, or inspections — or say goodbye to finish.";
+  const mainAudio =
+    params.assistantPlayUrl != null
+      ? `<Play>${escapeXml(params.assistantPlayUrl)}</Play>`
+      : `<Say voice="Polly.Nicole" language="en-AU">${escapeXml(params.assistantFallbackText)}</Say>`;
+
   if (mode === "gather") {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Nicole" language="en-AU">${escapeXml(assistantSpoken)}</Say>
+  ${mainAudio}
   <Gather
     input="speech"
     timeout="10"
     speechTimeout="auto"
-    action="${escapeXml(actionUrl)}"
+    action="${escapeXml(params.actionUrl)}"
     method="POST"
     language="en-AU"
   >
@@ -64,13 +86,13 @@ function continuationTwiml(assistantSpoken: string, actionUrl: string): string {
   }
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Nicole" language="en-AU">${escapeXml(assistantSpoken)}</Say>
+  ${mainAudio}
   <Say voice="Polly.Nicole" language="en-AU">${escapeXml(prompt)}</Say>
   <Record
     timeout="10"
     maxLength="120"
     playBeep="true"
-    action="${escapeXml(actionUrl)}"
+    action="${escapeXml(params.actionUrl)}"
     method="POST"
     trim="trim-silence"
   />
@@ -147,10 +169,17 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   const resolvedTenantId = tenantConfig?.tenant_id ?? tenantIdParam ?? null;
-  const systemPrompt =
+
+  const appendix =
     tenantConfig?.micah_persona && tenantConfig.micah_persona.trim().length > 0
       ? tenantConfig.micah_persona.trim()
-      : MICAH_SYSTEM_PROMPT;
+      : null;
+
+  const systemPrompt = buildMasterSystemPromptV2({
+    agencyName: tenantConfig?.agency_name,
+    principalName: tenantConfig?.principal_name,
+    tenantMicahPersonaAppendix: appendix,
+  });
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: systemPrompt },
@@ -174,6 +203,13 @@ export async function POST(req: Request): Promise<Response> {
     assistantText = "Something went wrong on our side. Please try again shortly.";
   }
 
+  let assistantPlayUrl: string | null = null;
+  try {
+    assistantPlayUrl = await cedarTtsPublicMp3Url(openai, supabase, assistantText, callSid);
+  } catch (e) {
+    console.error("cedar TTS:", e);
+  }
+
   try {
     await saveTurnToLead(supabase, {
       callSid,
@@ -182,7 +218,7 @@ export async function POST(req: Request): Promise<Response> {
       assistantText,
       history: prior,
       tenantId: resolvedTenantId,
-      openaiVoice: tenantConfig?.openai_voice ?? null,
+      openaiVoice: MICAH_OPENAI_VOICE,
     });
   } catch (e) {
     console.error("saveTurnToLead:", e);
@@ -194,7 +230,11 @@ export async function POST(req: Request): Promise<Response> {
       ? `?tenant_id=${encodeURIComponent(resolvedTenantId)}`
       : "";
   const action = `${base}/api/voice/process${tenantSuffix}`;
-  const twiml = continuationTwiml(assistantText, action);
+  const twiml = continuationTwiml({
+    assistantPlayUrl,
+    assistantFallbackText: assistantText,
+    actionUrl: action,
+  });
 
   return new NextResponse(twiml, {
     status: 200,

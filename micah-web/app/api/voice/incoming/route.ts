@@ -1,3 +1,8 @@
+/**
+ * Twilio Voice webhook — inbound TwiML for Record/Gather follow-ups.
+ * Assistant audio uses OpenAI Speech (`cedar`, speed 1.0) in `/api/voice/process`
+ * when `SUPABASE_TTS_BUCKET` is configured; otherwise Polly `<Say>` fallback.
+ */
 import { NextResponse } from "next/server";
 import { getServiceSupabase } from "@/lib/supabase-server";
 import { getTenantIdByInboundNumber } from "@/lib/micah/tenant-config";

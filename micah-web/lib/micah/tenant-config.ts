@@ -2,6 +2,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type TenantVoiceConfig = {
   tenant_id: string;
+  agency_name: string | null;
+  principal_name: string | null;
   micah_persona: string;
   openai_voice: string | null;
   notification_email: string | null;
@@ -16,7 +18,7 @@ export async function getTenantVoiceConfig(
 ): Promise<TenantVoiceConfig | null> {
   const { data, error } = await supabase
     .from("tenants")
-    .select("id, micah_persona, openai_voice, notification_email")
+    .select("id, agency_name, principal_name, micah_persona, openai_voice, notification_email")
     .eq("id", tenantId)
     .maybeSingle();
 
@@ -31,6 +33,14 @@ export async function getTenantVoiceConfig(
 
   return {
     tenant_id: data.id as string,
+    agency_name:
+      typeof (data as { agency_name?: unknown }).agency_name === "string"
+        ? ((data as { agency_name: string }).agency_name ?? "").trim() || null
+        : null,
+    principal_name:
+      typeof (data as { principal_name?: unknown }).principal_name === "string"
+        ? ((data as { principal_name: string }).principal_name ?? "").trim() || null
+        : null,
     micah_persona: persona,
     openai_voice:
       typeof data.openai_voice === "string" && data.openai_voice.trim()
