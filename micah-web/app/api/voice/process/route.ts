@@ -1,10 +1,7 @@
 import OpenAI, { toFile } from "openai";
 import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
-import { cedarTtsPublicMp3Url } from "@/lib/micah/cedar-tts";
-import {
-  MICAH_OPENAI_VOICE,
-  buildMasterSystemPromptV2,
-} from "@/lib/micah/master-prompt-v2";
+import { elevenLabsTtsPublicMp3Url } from "@/lib/micah/elevenlabs-tts";
+import { buildMasterSystemPromptV2 } from "@/lib/micah/master-prompt-v2";
 import { micahSayLine } from "@/lib/micah/twilio-voice";
 import { getTenantVoiceConfig } from "@/lib/micah/tenant-config";
 import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
@@ -317,9 +314,13 @@ async function handleVoiceProcess(req: Request): Promise<Response> {
 
   let assistantPlayUrl: string | null = null;
   try {
-    assistantPlayUrl = await cedarTtsPublicMp3Url(openai, supabase, assistantText, callSid);
+    assistantPlayUrl = await elevenLabsTtsPublicMp3Url(
+      supabase,
+      assistantText,
+      callSid
+    );
   } catch (e) {
-    console.error("[micah/voice/process] cedar TTS:", e);
+    console.error("[micah/voice/process] ElevenLabs TTS:", e);
   }
 
   if (supabase) {
@@ -331,7 +332,8 @@ async function handleVoiceProcess(req: Request): Promise<Response> {
         assistantText,
         history: prior,
         tenantId: resolvedTenantId,
-        openaiVoice: MICAH_OPENAI_VOICE,
+        openaiVoice:
+          process.env.ELEVENLABS_VOICE_ID?.trim() ?? "elevenlabs",
       });
     } catch (e) {
       console.error("[micah/voice/process] saveTurnToLead:", e);
