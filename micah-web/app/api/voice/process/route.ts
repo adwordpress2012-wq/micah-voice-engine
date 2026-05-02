@@ -1,6 +1,5 @@
 import OpenAI from "openai";
-import { NextResponse } from "next/server";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
 import { cedarTtsPublicMp3Url } from "@/lib/micah/cedar-tts";
 import {
   MICAH_OPENAI_VOICE,
@@ -8,7 +7,8 @@ import {
 } from "@/lib/micah/master-prompt-v2";
 import { micahSayLine } from "@/lib/micah/twilio-voice";
 import { getTenantVoiceConfig } from "@/lib/micah/tenant-config";
-import { buildPublicBaseUrl } from "@/lib/micah-prompt";
+import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
+import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { escapeXml } from "@/lib/twiml";
 import { loadHistory, saveTurnToLead } from "@/lib/voice-session";
 
@@ -139,16 +139,38 @@ function emptyInputTwiml(actionUrl: string): string {
 }
 
 export async function POST(req: Request): Promise<Response> {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) {
-    return new NextResponse("Missing OPENAI_API_KEY", { status: 500 });
+  try {
+    return await handleVoiceProcess(req);
+  } catch (e) {
+    console.error("[micah/voice/process] fatal:", e);
+    return twimlResponse(
+      plainErrorTwiML("Sorry — Micah hit a snag. Please try your call again shortly."),
+      "[micah/voice/process] fatal"
+    );
+  }
+}
+
+async function handleVoiceProcess(req: Request): Promise<Response> {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    console.warn("[micah/voice/process] OPENAI_API_KEY missing");
+    return twimlResponse(
+      plainErrorTwiML(
+        "Micah isn't fully configured on the server yet — please try again later."
+      ),
+      "[micah/voice/process] no-openai-key"
+    );
   }
 
   let form: FormData;
   try {
     form = await req.formData();
-  } catch {
-    return new NextResponse("Expected form body", { status: 400 });
+  } catch (e) {
+    console.error("[micah/voice/process] formData:", e);
+    return twimlResponse(
+      plainErrorTwiML("We couldn't read this call — please try again."),
+      "[micah/voice/process] bad-body"
+    );
   }
 
   const get = (k: string) => {
@@ -161,6 +183,13 @@ export async function POST(req: Request): Promise<Response> {
   const callSid = get("CallSid") ?? "unknown";
   const from = get("From") ?? "unknown";
 
+  console.log("[micah/voice/process] request", {
+    CallSid: callSid,
+    From: from,
+    SpeechResult: speechResult ? "[present]" : undefined,
+    RecordingUrl: recordingUrl ? "[present]" : undefined,
+  });
+
   const url = new URL(req.url);
   const tenantIdParam = url.searchParams.get("tenant_id");
   const tenantSuffix =
@@ -169,42 +198,53 @@ export async function POST(req: Request): Promise<Response> {
       : "";
 
   let userText = speechResult;
-  const openai = new OpenAI({ apiKey: key });
+  const openai = new OpenAI({ apiKey });
 
   if (!userText?.length && recordingUrl) {
     try {
       userText = await transcribeOpenAI(openai, recordingUrl, callSid);
     } catch (e) {
-      console.error(e);
+      console.error("[micah/voice/process] transcribe:", e);
       userText = "";
     }
   }
 
-  const baseEarly = buildPublicBaseUrl(req);
+  const baseEarly = safeBuildPublicBaseUrl(req);
   const actionEarly = `${baseEarly}/api/voice/process${tenantSuffix}`;
 
   if (!userText) {
-    const twiml = emptyInputTwiml(actionEarly);
-    return new NextResponse(twiml, {
-      status: 200,
-      headers: { "Content-Type": "text/xml; charset=utf-8" },
-    });
+    try {
+      const twiml = emptyInputTwiml(actionEarly);
+      return twimlResponse(twiml, "[micah/voice/process] empty-input");
+    } catch (e) {
+      console.error("[micah/voice/process] emptyInputTwiml:", e);
+      return twimlResponse(
+        plainErrorTwiML("I didn't catch that — please call back."),
+        "[micah/voice/process] empty-twiml-error"
+      );
+    }
   }
 
-  const supabase = getServiceSupabase();
+  const supabase = getServiceSupabaseOrNull();
+  if (!supabase) {
+    console.warn("[micah/voice/process] Supabase not configured — continuing without DB");
+  }
+
   let prior: Awaited<ReturnType<typeof loadHistory>> = [];
-  try {
-    prior = await loadHistory(supabase, callSid);
-  } catch (e) {
-    console.error("loadHistory:", e);
+  if (supabase) {
+    try {
+      prior = await loadHistory(supabase, callSid);
+    } catch (e) {
+      console.error("[micah/voice/process] loadHistory:", e);
+    }
   }
 
   let tenantConfig = null as Awaited<ReturnType<typeof getTenantVoiceConfig>>;
-  if (tenantIdParam) {
+  if (supabase && tenantIdParam) {
     try {
       tenantConfig = await getTenantVoiceConfig(supabase, tenantIdParam);
     } catch (e) {
-      console.error("getTenantVoiceConfig:", e);
+      console.error("[micah/voice/process] getTenantVoiceConfig:", e);
     }
   }
 
@@ -239,45 +279,56 @@ export async function POST(req: Request): Promise<Response> {
       completion.choices[0]?.message?.content?.trim() ??
       "Let me get someone from the team to call you back.";
   } catch (e) {
-    console.error(e);
-    assistantText = "Something went wrong on our side — give us another try soon.";
+    console.error("[micah/voice/process] chat completion:", e);
+    assistantText =
+      "I'm having a moment connecting — please try again or leave a message with the team.";
   }
 
   let assistantPlayUrl: string | null = null;
   try {
     assistantPlayUrl = await cedarTtsPublicMp3Url(openai, supabase, assistantText, callSid);
   } catch (e) {
-    console.error("cedar TTS:", e);
+    console.error("[micah/voice/process] cedar TTS:", e);
   }
 
-  try {
-    await saveTurnToLead(supabase, {
-      callSid,
-      callerId: from,
-      userText,
-      assistantText,
-      history: prior,
-      tenantId: resolvedTenantId,
-      openaiVoice: MICAH_OPENAI_VOICE,
-    });
-  } catch (e) {
-    console.error("saveTurnToLead:", e);
+  if (supabase) {
+    try {
+      await saveTurnToLead(supabase, {
+        callSid,
+        callerId: from,
+        userText,
+        assistantText,
+        history: prior,
+        tenantId: resolvedTenantId,
+        openaiVoice: MICAH_OPENAI_VOICE,
+      });
+    } catch (e) {
+      console.error("[micah/voice/process] saveTurnToLead:", e);
+    }
   }
 
-  const base = buildPublicBaseUrl(req);
+  const base = safeBuildPublicBaseUrl(req);
   const tenantSuffixEnd =
     resolvedTenantId != null && resolvedTenantId !== ""
       ? `?tenant_id=${encodeURIComponent(resolvedTenantId)}`
       : "";
   const action = `${base}/api/voice/process${tenantSuffixEnd}`;
-  const twiml = continuationTwiml({
-    assistantPlayUrl,
-    assistantFallbackText: assistantText,
-    actionUrl: action,
-  });
 
-  return new NextResponse(twiml, {
-    status: 200,
-    headers: { "Content-Type": "text/xml; charset=utf-8" },
-  });
+  let twiml: string;
+  try {
+    twiml = continuationTwiml({
+      assistantPlayUrl,
+      assistantFallbackText: assistantText,
+      actionUrl: action,
+    });
+  } catch (e) {
+    console.error("[micah/voice/process] continuationTwiml:", e);
+    twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  ${micahSayLine(assistantText)}
+  <Hangup/>
+</Response>`;
+  }
+
+  return twimlResponse(twiml, "[micah/voice/process] ok");
 }

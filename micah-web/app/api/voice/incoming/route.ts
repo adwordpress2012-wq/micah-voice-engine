@@ -1,17 +1,16 @@
 /**
  * Twilio Voice webhook — conversational loop via `<Gather speech>` → `/api/voice/process`.
- * Cedar TTS (`cedar` @ 1.0×) is applied in `/api/voice/process` when `SUPABASE_TTS_BUCKET` is set.
  */
 import { NextResponse } from "next/server";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
+import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { micahSayLine } from "@/lib/micah/twilio-voice";
 import { getTenantIdByInboundNumber } from "@/lib/micah/tenant-config";
-import { buildPublicBaseUrl } from "@/lib/micah-prompt";
+import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
 import { escapeXml } from "@/lib/twiml";
 
 export const maxDuration = 30;
 
-/** Conversational turn: Say → Gather speech → same webhook on reply (loops until silence timeout). */
 function twimlGather(action: string): string {
   const greeting =
     "Hey there! I'm Micah — super glad you called. What's going on, and how can I help?";
@@ -34,7 +33,6 @@ function twimlGather(action: string): string {
 </Response>`;
 }
 
-/** Optional: raw recording + OpenAI Whisper when MICAH_TWIML_MODE=record. */
 function twimlRecord(action: string): string {
   const greeting =
     "Hey! I'm Micah — After the tone, tell me what you need and I'll jump on it.";
@@ -55,33 +53,63 @@ function twimlRecord(action: string): string {
 </Response>`;
 }
 
-/**
- * Default: `gather` — continuous speech conversation with Twilio STT → GPT → Cedar/Polly reply → Gather again.
- * Set MICAH_TWIML_MODE=record only if you need Whisper on recordings instead.
- */
 export async function POST(req: Request): Promise<Response> {
-  const base = buildPublicBaseUrl(req);
-  let tenantQuery = "";
   try {
-    const form = await req.formData();
-    const to = form.get("To");
-    if (typeof to === "string" && to.length > 0) {
-      const supabase = getServiceSupabase();
-      const id = await getTenantIdByInboundNumber(supabase, to);
-      if (id) {
-        tenantQuery = `?tenant_id=${encodeURIComponent(id)}`;
-      }
+    let form: FormData | null = null;
+    try {
+      form = await req.formData();
+    } catch (e) {
+      console.error("[micah/voice/incoming] formData parse:", e);
     }
+
+    const incomingSummary = {
+      CallSid: typeof form?.get("CallSid") === "string" ? form.get("CallSid") : undefined,
+      From: typeof form?.get("From") === "string" ? form.get("From") : undefined,
+      To: typeof form?.get("To") === "string" ? form.get("To") : undefined,
+      AccountSid:
+        typeof form?.get("AccountSid") === "string" ? form.get("AccountSid") : undefined,
+    };
+    console.log("[micah/voice/incoming] request", incomingSummary);
+
+    const base = safeBuildPublicBaseUrl(req);
+    let tenantQuery = "";
+    try {
+      const to = form?.get("To");
+      if (typeof to === "string" && to.length > 0) {
+        const supabase = getServiceSupabaseOrNull();
+        if (supabase) {
+          const id = await getTenantIdByInboundNumber(supabase, to);
+          if (id) {
+            tenantQuery = `?tenant_id=${encodeURIComponent(id)}`;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("[micah/voice/incoming] tenant lookup:", e);
+    }
+
+    const action = `${base}/api/voice/process${tenantQuery}`;
+    const mode = (process.env.MICAH_TWIML_MODE ?? "gather").toLowerCase();
+
+    let twiml: string;
+    try {
+      twiml = mode === "record" ? twimlRecord(action) : twimlGather(action);
+    } catch (e) {
+      console.error("[micah/voice/incoming] twiml build:", e);
+      return twimlResponse(
+        plainErrorTwiML("Micah hit a quick glitch building your call. Please try again."),
+        "[micah/voice/incoming] twiml-build-error"
+      );
+    }
+
+    return twimlResponse(twiml, "[micah/voice/incoming]");
   } catch (e) {
-    console.error("incoming / tenant lookup:", e);
+    console.error("[micah/voice/incoming] fatal:", e);
+    return twimlResponse(
+      plainErrorTwiML(
+        "Hi — Micah's having a quick tech moment. Please hang up and try again in a minute."
+      ),
+      "[micah/voice/incoming] fatal"
+    );
   }
-
-  const action = `${base}/api/voice/process${tenantQuery}`;
-  const mode = (process.env.MICAH_TWIML_MODE ?? "gather").toLowerCase();
-  const twiml = mode === "record" ? twimlRecord(action) : twimlGather(action);
-
-  return new NextResponse(twiml, {
-    status: 200,
-    headers: { "Content-Type": "text/xml; charset=utf-8" },
-  });
 }

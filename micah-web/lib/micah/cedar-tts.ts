@@ -8,10 +8,13 @@ import { MICAH_OPENAI_VOICE, MICAH_SPEECH_SPEED } from "@/lib/micah/master-promp
  */
 export async function cedarTtsPublicMp3Url(
   openai: OpenAI,
-  supabase: SupabaseClient,
+  supabase: SupabaseClient | null,
   text: string,
   callSid: string
 ): Promise<string | null> {
+  if (!supabase) {
+    return null;
+  }
   const bucket = process.env.SUPABASE_TTS_BUCKET?.trim();
   if (!bucket) {
     return null;

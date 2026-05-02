@@ -36,3 +36,19 @@ export function buildPublicBaseUrl(req?: Pick<Request, "headers">): string {
     "Set NEXT_PUBLIC_APP_URL for Twilio callbacks (e.g. https://micah.directiveos.com.au)"
   );
 }
+
+/** Never throws — use in voice webhooks so Twilio always gets 200 + valid XML. */
+export function safeBuildPublicBaseUrl(req: Request): string {
+  try {
+    return buildPublicBaseUrl(req);
+  } catch {
+    const fromEnv = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "");
+    if (fromEnv) return fromEnv;
+    try {
+      const u = new URL(req.url);
+      return `${u.protocol}//${u.host}`.replace(/\/$/, "");
+    } catch {
+      return "https://micah.directiveos.com.au";
+    }
+  }
+}
