@@ -13,27 +13,49 @@ export const maxDuration = 60;
 
 const GPT_MODEL = process.env.OPENAI_CHAT_MODEL ?? "gpt-4o";
 
-/** Twilio recording URLs require HTTP Basic auth (AccountSid:AuthToken). */
+/** Optional JSON map of AccountSid → auth token for multi-account Twilio (same keys as Console). */
+function twilioAuthTokenForAccount(accountSid: string): string | undefined {
+  const raw = process.env.TWILIO_AUTH_BY_ACCOUNT_JSON?.trim();
+  if (!raw) return undefined;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    const v = o[accountSid];
+    return typeof v === "string" && v.trim() ? v.trim() : undefined;
+  } catch {
+    console.warn("[micah/voice] TWILIO_AUTH_BY_ACCOUNT_JSON is invalid JSON");
+    return undefined;
+  }
+}
+
+/** Twilio recording URLs require HTTP Basic auth (AccountSid:AuthToken). Webhook AccountSid takes priority. */
 async function fetchRecordingBytes(
   recordingUrl: string,
   accountSidFromWebhook?: string
 ): Promise<ArrayBuffer | null> {
   const sid = (
-    process.env.TWILIO_ACCOUNT_SID ??
-    accountSidFromWebhook ??
+    accountSidFromWebhook?.trim() ||
+    process.env.TWILIO_ACCOUNT_SID?.trim() ||
     ""
   ).trim();
-  const token = process.env.TWILIO_AUTH_TOKEN?.trim();
+
+  const mapped = sid ? twilioAuthTokenForAccount(sid) : undefined;
+  const token = (mapped ?? process.env.TWILIO_AUTH_TOKEN?.trim()) ?? "";
+
   if (!token) {
     console.error("ERROR: TWILIO_AUTH_TOKEN IS MISSING IN VERCEL");
     return null;
   }
   if (!sid) {
     console.warn(
-      "[micah/voice] Recording fetch skipped: set TWILIO_ACCOUNT_SID or rely on Twilio AccountSid on webhooks"
+      "[micah/voice] Recording fetch skipped: no AccountSid on webhook and TWILIO_ACCOUNT_SID unset"
     );
     return null;
   }
+
+  if (mapped) {
+    console.log(`[micah/voice] recording auth: using TWILIO_AUTH_BY_ACCOUNT_JSON for ${sid.slice(0, 6)}…`);
+  }
+
   const res = await fetch(recordingUrl, {
     headers: {
       Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`,
@@ -41,7 +63,7 @@ async function fetchRecordingBytes(
   });
   if (res.status === 401) {
     console.warn(
-      "[micah/voice] Recording 401: TWILIO_AUTH_TOKEN must match the Twilio account for this recording (same org as TWILIO_ACCOUNT_SID / webhook AccountSid)"
+      `[micah/voice] Recording 401: use a token for AccountSid ${sid} — set TWILIO_AUTH_BY_ACCOUNT_JSON for multi-account or fix TWILIO_AUTH_TOKEN`
     );
     return null;
   }
@@ -288,6 +310,9 @@ async function handleVoiceProcess(req: Request): Promise<Response> {
     principalName: tenantConfig?.principal_name,
     tenantMicahPersonaAppendix: appendix,
   });
+  console.log(
+    `[micah/debug] Syla system prompt active (master-prompt-v2, ${systemPrompt.length} chars)`
+  );
 
   const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
     { role: "system", content: systemPrompt },
@@ -320,8 +345,11 @@ async function handleVoiceProcess(req: Request): Promise<Response> {
       callSid
     );
   } catch (e) {
-    console.error("[micah/voice/process] ElevenLabs TTS:", e);
+    console.error("[micah/voice/process] ElevenLabs TTS (non-fatal):", e);
   }
+  console.log(
+    `[micah/debug] AccountSid: ${accountSid ?? "none"}, TTS Success: ${assistantPlayUrl != null}`
+  );
 
   if (supabase) {
     try {
@@ -347,21 +375,20 @@ async function handleVoiceProcess(req: Request): Promise<Response> {
       : "";
   const action = `${base}/api/voice/process${tenantSuffixEnd}`;
 
-  let twiml: string;
   try {
-    twiml = continuationTwiml({
+    const twiml = continuationTwiml({
       assistantPlayUrl,
       assistantFallbackText: assistantText,
       actionUrl: action,
     });
+    return twimlResponse(twiml, "[micah/voice/process] ok");
   } catch (e) {
-    console.error("[micah/voice/process] continuationTwiml:", e);
-    twiml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${micahSayLine(assistantText)}
-  <Hangup/>
-</Response>`;
+    console.error("[micah/voice/process] continuationTwiml (Polly fallback):", e);
+    return twimlResponse(
+      plainErrorTwiML(
+        `${assistantText.slice(0, 350)} Sorry — I'm having trouble continuing this call. Please try again soon.`
+      ),
+      "[micah/voice/process] continuation-plain-fallback"
+    );
   }
-
-  return twimlResponse(twiml, "[micah/voice/process] ok");
 }

@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
+import { micahPollyVoice } from "@/lib/micah/twilio-voice";
 import { escapeXml } from "@/lib/twiml";
 
-/** Minimal valid TwiML when handlers cannot build the full flow (never depends on env-heavy helpers). */
+/** Minimal valid TwiML when handlers cannot build the full flow (Polly Nicole/Olivia via `MICAH_POLLY_VOICE`). */
 export function plainErrorTwiML(userMessage: string): string {
   const t = escapeXml(userMessage.slice(0, 1000));
+  const v = escapeXml(micahPollyVoice());
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Nicole" language="en-AU">${t}</Say>
+  <Say voice="${v}" language="en-AU">${t}</Say>
   <Hangup/>
 </Response>`;
 }
