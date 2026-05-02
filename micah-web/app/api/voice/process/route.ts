@@ -10,6 +10,8 @@ import { escapeXml } from "@/lib/twiml";
 import { loadHistory, saveTurnToLead } from "@/lib/voice-session";
 
 export const maxDuration = 60;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const GPT_MODEL = process.env.OPENAI_CHAT_MODEL ?? "gpt-4o";
 
@@ -184,6 +186,14 @@ function emptyInputTwiml(actionUrl: string): string {
   ${micahSayLine("I'll let you go — bye for now!")}
   <Hangup/>
 </Response>`;
+}
+
+/** Sanity check — Twilio Voice uses POST with form body. */
+export async function GET() {
+  return new Response("Micah /api/voice/process OK — POST Twilio callbacks here.", {
+    status: 200,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
 }
 
 export async function POST(req: Request): Promise<Response> {
