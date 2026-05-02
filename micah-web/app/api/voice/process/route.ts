@@ -16,17 +16,37 @@ export const maxDuration = 60;
 
 const GPT_MODEL = process.env.OPENAI_CHAT_MODEL ?? "gpt-4o";
 
-async function fetchRecordingBytes(recordingUrl: string): Promise<ArrayBuffer> {
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const token = process.env.TWILIO_AUTH_TOKEN;
-  const headers: HeadersInit = {};
-  if (sid && token) {
-    const basic = Buffer.from(`${sid}:${token}`).toString("base64");
-    headers.Authorization = `Basic ${basic}`;
+/** Twilio recording URLs require HTTP Basic auth (AccountSid:AuthToken). */
+async function fetchRecordingBytes(
+  recordingUrl: string,
+  accountSidFromWebhook?: string
+): Promise<ArrayBuffer | null> {
+  const sid = (
+    process.env.TWILIO_ACCOUNT_SID ??
+    accountSidFromWebhook ??
+    ""
+  ).trim();
+  const token = process.env.TWILIO_AUTH_TOKEN?.trim();
+  if (!sid || !token) {
+    console.warn(
+      "[micah/voice] Recording fetch skipped: set TWILIO_AUTH_TOKEN and TWILIO_ACCOUNT_SID (optional: Twilio sends AccountSid on webhooks—token must match that account)"
+    );
+    return null;
   }
-  const res = await fetch(recordingUrl, { headers });
+  const res = await fetch(recordingUrl, {
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString("base64")}`,
+    },
+  });
+  if (res.status === 401) {
+    console.warn(
+      "[micah/voice] Recording 401: TWILIO_AUTH_TOKEN must match the Twilio account for this recording (same org as TWILIO_ACCOUNT_SID / webhook AccountSid)"
+    );
+    return null;
+  }
   if (!res.ok) {
-    throw new Error(`Recording fetch failed: ${res.status}`);
+    console.warn(`[micah/voice] Recording fetch HTTP ${res.status}`);
+    return null;
   }
   return res.arrayBuffer();
 }
@@ -34,9 +54,13 @@ async function fetchRecordingBytes(recordingUrl: string): Promise<ArrayBuffer> {
 async function transcribeOpenAI(
   openai: OpenAI,
   recordingUrl: string,
-  callSid: string
+  callSid: string,
+  accountSid?: string
 ): Promise<string> {
-  const buf = await fetchRecordingBytes(recordingUrl);
+  const buf = await fetchRecordingBytes(recordingUrl, accountSid);
+  if (!buf) {
+    return "";
+  }
   const blob = new Blob([buf], { type: "audio/wav" });
   const file = new File([blob], `${callSid}.wav`, { type: "audio/wav" });
   const model = process.env.OPENAI_TRANSCRIBE_MODEL ?? "whisper-1";
@@ -182,6 +206,7 @@ async function handleVoiceProcess(req: Request): Promise<Response> {
   const recordingUrl = get("RecordingUrl");
   const callSid = get("CallSid") ?? "unknown";
   const from = get("From") ?? "unknown";
+  const accountSid = get("AccountSid");
 
   console.log("[micah/voice/process] request", {
     CallSid: callSid,
@@ -202,7 +227,7 @@ async function handleVoiceProcess(req: Request): Promise<Response> {
 
   if (!userText?.length && recordingUrl) {
     try {
-      userText = await transcribeOpenAI(openai, recordingUrl, callSid);
+      userText = await transcribeOpenAI(openai, recordingUrl, callSid, accountSid);
     } catch (e) {
       console.error("[micah/voice/process] transcribe:", e);
       userText = "";

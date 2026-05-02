@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getServiceSupabase } from "@/lib/supabase-server";
+import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { getTenantVoiceConfig } from "@/lib/micah/tenant-config";
 import { sendCallSummaryEmail } from "@/lib/send-call-summary-email";
 import type { ChatTurn } from "@/lib/voice-session";
@@ -32,7 +32,11 @@ export async function POST(req: Request): Promise<Response> {
     return new NextResponse(null, { status: 204 });
   }
 
-  const supabase = getServiceSupabase();
+  const supabase = getServiceSupabaseOrNull();
+  if (!supabase) {
+    console.warn("[micah/voice/call-status] Supabase not configured — skip email");
+    return new NextResponse(null, { status: 204 });
+  }
 
   const { data: rows, error: leadErr } = await supabase
     .from("leads")
