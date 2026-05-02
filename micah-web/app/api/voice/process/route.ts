@@ -27,9 +27,13 @@ async function fetchRecordingBytes(
     ""
   ).trim();
   const token = process.env.TWILIO_AUTH_TOKEN?.trim();
-  if (!sid || !token) {
+  if (!token) {
+    console.error("ERROR: TWILIO_AUTH_TOKEN IS MISSING IN VERCEL");
+    return null;
+  }
+  if (!sid) {
     console.warn(
-      "[micah/voice] Recording fetch skipped: set TWILIO_AUTH_TOKEN and TWILIO_ACCOUNT_SID (optional: Twilio sends AccountSid on webhooks—token must match that account)"
+      "[micah/voice] Recording fetch skipped: set TWILIO_ACCOUNT_SID or rely on Twilio AccountSid on webhooks"
     );
     return null;
   }
