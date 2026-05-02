@@ -35,29 +35,6 @@ function twimlGather(action: string): string {
 </Response>`;
 }
 
-/** When no `tenants` row matches inbound DID — keeps caller on the line with a generic Syla greeting (200 OK). */
-function twimlGatherFallback(action: string): string {
-  const greeting =
-    "Hi — you've reached Directive OS. I'm Micah. How can I help you today?";
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${micahSayLine(greeting)}
-  <Gather
-    input="speech"
-    timeout="15"
-    speechTimeout="auto"
-    action="${escapeXml(action)}"
-    method="POST"
-    language="en-AU"
-  >
-    ${micahSayLine("Go ahead whenever you're ready.")}
-  </Gather>
-  ${micahSayLine("I'll hang up — feel free to call back. Goodbye.")}
-  <Hangup/>
-</Response>`;
-}
-
 function twimlRecord(action: string): string {
   const greeting =
     "Hey! I'm Micah — After the tone, tell me what you need and I'll jump on it.";
@@ -91,6 +68,17 @@ export async function GET() {
 
 export async function POST(req: Request): Promise<Response> {
   console.log("Call Received");
+  console.log("[micah/debug] env snapshot:", {
+    OPENAI: Boolean(process.env.OPENAI_API_KEY?.trim()),
+    SUPABASE_URL: Boolean(
+      process.env.SUPABASE_URL?.trim() || process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
+    ),
+    SUPABASE_SERVICE_ROLE: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()),
+    ELEVENLABS: Boolean(
+      process.env.ELEVENLABS_API_KEY?.trim() && process.env.ELEVENLABS_VOICE_ID?.trim()
+    ),
+    TTS_BUCKET: Boolean(process.env.SUPABASE_TTS_BUCKET?.trim()),
+  });
   try {
     if (!process.env.OPENAI_API_KEY?.trim()) {
       console.warn("[micah/voice/incoming] OPENAI_API_KEY missing — /process will return configured error TwiML");
@@ -131,10 +119,8 @@ export async function POST(req: Request): Promise<Response> {
           if (tenant) {
             tenantQuery = `?tenant_id=${encodeURIComponent(tenant.tenant_id)}`;
           } else {
-            const actionFallback = `${base}/api/voice/process`;
-            return twimlResponse(
-              twimlGatherFallback(actionFallback),
-              "[micah/voice/incoming] tenant-not-found-fallback"
+            console.warn(
+              "[micah/voice/incoming] no tenant for this DID — continuing with default Micah greeting (no tenant_id)"
             );
           }
         }
