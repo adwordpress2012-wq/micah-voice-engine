@@ -54,6 +54,7 @@ function twimlRecord(action: string): string {
 }
 
 export async function POST(req: Request): Promise<Response> {
+  console.log("Call Received");
   try {
     let form: FormData | null = null;
     try {

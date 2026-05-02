@@ -11,6 +11,7 @@ export function plainErrorTwiML(userMessage: string): string {
 </Response>`;
 }
 
+/** Twilio Voice webhooks must get HTTP 200 with XML; errors use Say/Hangup in-body, not 5xx. */
 export function twimlResponse(twiml: string, logLabel: string): NextResponse {
   const safe =
     twiml.length > 16000 ? `${twiml.slice(0, 16000)}\n<!-- truncated for log -->` : twiml;

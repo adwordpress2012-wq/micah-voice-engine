@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
 import { cedarTtsPublicMp3Url } from "@/lib/micah/cedar-tts";
 import {
@@ -61,8 +61,9 @@ async function transcribeOpenAI(
   if (!buf) {
     return "";
   }
-  const blob = new Blob([buf], { type: "audio/wav" });
-  const file = new File([blob], `${callSid}.wav`, { type: "audio/wav" });
+  const file = await toFile(Buffer.from(buf), `${callSid}.wav`, {
+    type: "audio/wav",
+  });
   const model = process.env.OPENAI_TRANSCRIBE_MODEL ?? "whisper-1";
   const forceEnglishOnly = process.env.MICAH_STT_MULTILINGUAL === "false";
   const fixedLang = process.env.OPENAI_TRANSCRIBE_LANGUAGE?.trim();
@@ -163,6 +164,7 @@ function emptyInputTwiml(actionUrl: string): string {
 }
 
 export async function POST(req: Request): Promise<Response> {
+  console.log("Call Received");
   try {
     return await handleVoiceProcess(req);
   } catch (e) {
