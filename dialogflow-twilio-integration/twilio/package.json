@@ -1,0 +1,32 @@
+{
+  "name": "twilio-integration",
+  "version": "0.0.1",
+  "description": "A server that connects Google's dialogflow to twilio",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "dialogflow": "0.9.1",
+    "express": "^4.16.4",
+    "request": "^2.88.0",
+    "twilio": "3.33.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.12.2",
+    "typescript": "^5.9.3"
+    // Optionally add:
+    // "@types/request": "^2.48.10",
+    // "@types/twilio": "^3.19.7"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git"
+  },
+  "license": "Apache-2.0"
+}

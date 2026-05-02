@@ -57,7 +57,7 @@ function twimlRecord(action: string): string {
  * - `MICAH_TWIML_MODE=record` or unset → `<Record>` + OpenAI transcription from `RecordingUrl`.
  */
 export async function POST(req: Request): Promise<Response> {
-  const base = buildPublicBaseUrl();
+  const base = buildPublicBaseUrl(req);
   let tenantQuery = "";
   try {
     const form = await req.formData();

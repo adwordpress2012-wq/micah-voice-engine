@@ -188,7 +188,7 @@ export async function POST(req: Request): Promise<Response> {
     console.error("saveTurnToLead:", e);
   }
 
-  const base = buildPublicBaseUrl();
+  const base = buildPublicBaseUrl(req);
   const tenantSuffix =
     resolvedTenantId != null && resolvedTenantId !== ""
       ? `?tenant_id=${encodeURIComponent(resolvedTenantId)}`
