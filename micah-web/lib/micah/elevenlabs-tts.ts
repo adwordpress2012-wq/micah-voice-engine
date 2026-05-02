@@ -3,6 +3,22 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 const DEFAULT_MODEL = "eleven_multilingual_v2";
 
+/** Drain Web `ReadableStream` bytes without relying on `Response(stream)` (Node/Web compatible). */
+async function readableStreamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const reader = stream.getReader();
+  const chunks: Buffer[] = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value?.length) chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks);
+}
+
 /**
  * ElevenLabs TTS → MP3 upload to Supabase public bucket for Twilio `<Play>`.
  * Returns null if env, Supabase, or synthesis fails (caller should use Polly `<Say>`).
@@ -39,7 +55,11 @@ export async function elevenLabsTtsPublicMp3Url(
       outputFormat: "mp3_44100_128",
     });
 
-    const buf = Buffer.from(await new Response(stream).arrayBuffer());
+    const buf = await readableStreamToBuffer(stream);
+    if (!buf.length) {
+      console.warn("[micah/elevenlabs] empty audio stream");
+      return null;
+    }
     const path = `micah-tts/${callSid}/${Date.now()}.mp3`;
     const { error: upErr } = await supabase.storage.from(bucket).upload(path, buf, {
       contentType: "audio/mpeg",
