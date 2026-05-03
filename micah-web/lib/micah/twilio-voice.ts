@@ -9,9 +9,9 @@ type TwilioVoice = import("twilio/lib/twiml/VoiceResponse");
 
 export const MICAH_SAY_LANGUAGE = "en-AU";
 
-/** Default Nicole matches `MICAH_SAY_LANGUAGE` en-AU (Olivia is often en-US-only → Twilio 13520 Invalid text). */
+/** Polly.Olivia is the AWS Neural en-AU female voice. Nicole is deprecated and causes Twilio to fall back to "man". */
 export function micahPollyVoice(): string {
-  return process.env.MICAH_POLLY_VOICE?.trim() || "Polly.Nicole";
+  return process.env.MICAH_POLLY_VOICE?.trim() || "Polly.Olivia";
 }
 
 /** Twilio Node SDK `say()` / nested `gather.say()` attributes (env voice string is widened to `SayVoice`). */

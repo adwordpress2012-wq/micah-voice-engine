@@ -88,6 +88,13 @@ export async function GET() {
 }
 
 async function handleProcess(request: Request) {
+  console.log("[micah/debug] EL Status:", {
+    hasKey: !!process.env.ELEVENLABS_API_KEY,
+    hasBucket: !!process.env.SUPABASE_TTS_BUCKET,
+    pollyVoice: process.env.MICAH_POLLY_VOICE?.trim() || "Polly.Olivia (default)",
+    appUrl: process.env.NEXT_PUBLIC_APP_URL?.trim() || "(not set — falling back to headers)",
+  });
+
   let form: FormData;
   try {
     form = await request.formData();
@@ -125,7 +132,11 @@ async function handleProcess(request: Request) {
   const callSid = formString(form, "CallSid");
   const from = formString(form, "From");
 
-  const base = safeBuildPublicBaseUrl(request);
+  // NEXT_PUBLIC_APP_URL is always preferred so Twilio's <Gather action> never points to a
+  // preview deployment or a forwarded-host value that changes between Vercel environments.
+  const base =
+    process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ||
+    safeBuildPublicBaseUrl(request);
   const processUrl = `${base}/api/voice/process`;
 
   if (!userSpeechRaw) {
