@@ -84,9 +84,10 @@ export async function POST(request: NextRequest) {
 
       const vr = new twilio.twiml.VoiceResponse();
       const connect = vr.connect();
+      // Twilio <Connect><Stream> allows only `inbound_track` (not `both_tracks` — error 31941).
       const stream = connect.stream({
         url: streamUrl,
-        track: "both_tracks",
+        track: "inbound_track",
       });
       stream.parameter({ name: "From", value: from });
       stream.parameter({ name: "To", value: to });

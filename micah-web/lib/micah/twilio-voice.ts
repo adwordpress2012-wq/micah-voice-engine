@@ -9,8 +9,9 @@ type TwilioVoice = import("twilio/lib/twiml/VoiceResponse");
 
 export const MICAH_SAY_LANGUAGE = "en-AU";
 
+/** Default Nicole matches `MICAH_SAY_LANGUAGE` en-AU (Olivia is often en-US-only → Twilio 13520 Invalid text). */
 export function micahPollyVoice(): string {
-  return process.env.MICAH_POLLY_VOICE?.trim() || "Polly.Olivia";
+  return process.env.MICAH_POLLY_VOICE?.trim() || "Polly.Nicole";
 }
 
 /** Twilio Node SDK `say()` / nested `gather.say()` attributes (env voice string is widened to `SayVoice`). */

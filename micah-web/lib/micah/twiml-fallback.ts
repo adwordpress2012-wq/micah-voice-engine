@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { micahPollyVoice } from "@/lib/micah/twilio-voice";
 import { escapeXml } from "@/lib/twiml";
 
-/** Minimal valid TwiML when handlers cannot build the full flow (Polly Nicole/Olivia via `MICAH_POLLY_VOICE`). */
+/** Minimal valid TwiML when handlers cannot build the full flow (Polly via `MICAH_POLLY_VOICE`, default en-AU-safe). */
 export function plainErrorTwiML(userMessage: string): string {
   const t = escapeXml(userMessage.slice(0, 1000));
   const v = escapeXml(micahPollyVoice());
