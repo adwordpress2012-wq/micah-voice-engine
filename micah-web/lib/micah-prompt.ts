@@ -1,13 +1,10 @@
-/**
- * Legacy baseline copy (non-voice tooling). Phone flows use `MASTER_SYSTEM_PROMPT_V2`
- * + tenant substitutions via `buildMasterSystemPromptV2` in `lib/micah/master-prompt-v2.ts`.
- */
-export const MICAH_SYSTEM_PROMPT = `You are Micah, a high-energy, professional phone assistant for industrial and commercial real estate in Western Sydney, Australia. 
-You focus on warehouses, logistics, manufacturing sites, and business parks in areas like Wetherill Park, Smithfield, Erskine Park, Eastern Creek, and nearby corridors.
-Use Australian English. Be concise (this is a phone call). Sound like a clear, warm, confident "Cedar"-style voice: friendly, direct, no filler, no long monologues.
-You help with enquiries, inspections, rough availability, and next steps; you do not give legal or financial advice. 
-If you do not know a fact, say you will have a human specialist follow up. Never claim to be human.`;
+import { buildMicahDirectiveGatherSystemPrompt } from "@/lib/micah/micah-directive-os-persona";
 
+/**
+ * Default Micah baseline for any legacy import (same locked persona as voice; main-line rules when `To` unknown).
+ * Phone/webchat primary flows use `buildMasterSystemPromptV2` / per-route builders where applicable.
+ */
+export const MICAH_SYSTEM_PROMPT = buildMicahDirectiveGatherSystemPrompt("");
 /**
  * Canonical HTTPS URL for Twilio `<Record>` / `<Gather>` action attributes.
  * When `req` is present (Twilio webhooks), uses `Host` / `x-forwarded-host` first
@@ -35,6 +32,22 @@ export function buildPublicBaseUrl(req?: Pick<Request, "headers">): string {
   throw new Error(
     "Set NEXT_PUBLIC_APP_URL for Twilio callbacks (e.g. https://micah.directiveos.com.au)"
   );
+}
+
+/**
+ * Twilio `<Gather action="…">` must hit your stable production origin.
+ * **Always** use `NEXT_PUBLIC_APP_URL` when set (Fly / Vercel canonical HTTPS).
+ * If unset, falls back to request-derived URL and logs a `[Micah-Audit]` warning.
+ */
+export function resolveVoiceActionBaseUrl(req: Request): string {
+  const canonical = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "").trim();
+  if (canonical) return canonical;
+  const derived = safeBuildPublicBaseUrl(req);
+  console.warn(
+    "[Micah-Audit] NEXT_PUBLIC_APP_URL unset — Gather action URL is derived from this request, not your canonical app URL:",
+    derived
+  );
+  return derived;
 }
 
 /** Never throws — use in voice webhooks so Twilio always gets 200 + valid XML. */

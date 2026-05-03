@@ -1,15 +1,28 @@
 import OpenAI from "openai";
+import twilio from "twilio";
 import { Resend } from "resend";
-import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
-import { micahSayLine } from "@/lib/micah/twilio-voice";
-import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
+import { plainErrorTwiMLResponse, twimlResponse } from "@/lib/micah/twiml-fallback";
+import {
+  canUseElevenLabsTts,
+  defaultElevenLabsTtsTimeoutMs,
+  elevenLabsTtsPublicMp3UrlWithTimeout,
+} from "@/lib/micah/elevenlabs-tts";
+import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
-import { escapeXml } from "@/lib/twiml";
 import {
   isUuid,
   lookupClientByTwilioTo,
   type MicahClientRow,
 } from "@/lib/micah/lookup-client";
+import { buildMicahDirectiveProcessSystemPrompt } from "@/lib/micah/micah-directive-os-persona";
+import {
+  MICAH_SAY_LANGUAGE,
+  gatherPlayOrPollyOliviaSay,
+  playOrPollyOliviaSay,
+} from "@/lib/micah/twilio-voice";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+type TwilioVR = import("twilio/lib/twiml/VoiceResponse");
 
 export const maxDuration = 60;
 export const runtime = "nodejs";
@@ -17,78 +30,138 @@ export const dynamic = "force-dynamic";
 
 const MODEL = process.env.OPENAI_MICAH_PROCESS_MODEL ?? "gpt-4o-mini";
 
-function buildSystemPrompt(agencyName: string): string {
-  return `You are Micah, a young, vibrant Australian real estate receptionist.
-
-You work for ${agencyName}.
-
-STRICT RULES:
-
-* Follow NSW Property Services Act 2022 guidelines
-* DO NOT provide property prices or price guides
-* If asked about price, say:
-  "I'll have the listing agent send you the full details shortly."
-
-Voice:
-
-* Friendly, confident, professional
-* Keep responses short
-
-Goal:
-
-* Capture name
-* Budget (if provided)
-* Timeline
-* Property type`;
-}
-
 function fallbackClient(): MicahClientRow {
   return {
     id: "",
     agency_name:
-      process.env.MICAH_FALLBACK_AGENCY_NAME?.trim() ?? "our office",
+      process.env.MICAH_FALLBACK_AGENCY_NAME?.trim() ?? "Directive OS",
     twilio_number: "",
     email: process.env.MICAH_FALLBACK_CLIENT_EMAIL?.trim() ?? "",
     domain: null,
   };
 }
 
-function conversationTwiml(assistantLine: string, gatherActionUrl: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${micahSayLine(assistantLine)}
-  <Gather
-    input="speech"
-    timeout="15"
-    speechTimeout="auto"
-    action="${escapeXml(gatherActionUrl)}"
-    method="POST"
-    language="en-AU"
-  >
-    ${micahSayLine("Anything else I can help with?")}
-  </Gather>
-  ${micahSayLine("Thanks for calling — goodbye for now.")}
-  <Hangup/>
-</Response>`;
+async function buildOpeningTwiml(
+  greeting: string,
+  gatherActionUrl: string,
+  supabase: SupabaseClient | null,
+  callSid: string
+): Promise<string> {
+  const vr = new twilio.twiml.VoiceResponse();
+  const sid = callSid || `anon-${Date.now()}`;
+  const budget = defaultElevenLabsTtsTimeoutMs();
+
+  const staticGreetingMp3 = process.env.MICAH_GREETING_MP3_URL?.trim() || null;
+  let greetUrl: string | null = staticGreetingMp3;
+  let listenUrl: string | null = null;
+  let timeoutUrl: string | null = null;
+  if (canUseElevenLabsTts(supabase) && supabase) {
+    const listenP = elevenLabsTtsPublicMp3UrlWithTimeout(
+      supabase,
+      "I'm listening.",
+      sid,
+      budget
+    );
+    const timeoutP = elevenLabsTtsPublicMp3UrlWithTimeout(
+      supabase,
+      "I'll hang up — feel free to call back anytime.",
+      sid,
+      budget
+    );
+    if (!greetUrl) {
+      [greetUrl, listenUrl, timeoutUrl] = await Promise.all([
+        elevenLabsTtsPublicMp3UrlWithTimeout(supabase, greeting, sid, budget),
+        listenP,
+        timeoutP,
+      ]);
+    } else {
+      [listenUrl, timeoutUrl] = await Promise.all([listenP, timeoutP]);
+    }
+  }
+
+  playOrPollyOliviaSay(vr, greetUrl, greeting);
+
+  const gather = vr.gather({
+    input: ["speech"],
+    timeout: 15,
+    speechTimeout: "auto",
+    action: gatherActionUrl,
+    method: "POST",
+    language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
+  });
+  gatherPlayOrPollyOliviaSay(gather, listenUrl, "I'm listening.");
+
+  playOrPollyOliviaSay(
+    vr,
+    timeoutUrl,
+    "I'll hang up — feel free to call back anytime."
+  );
+  vr.hangup();
+  return vr.toString();
 }
 
-function openingTwiml(greeting: string, gatherActionUrl: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${micahSayLine(greeting)}
-  <Gather
-    input="speech"
-    timeout="15"
-    speechTimeout="auto"
-    action="${escapeXml(gatherActionUrl)}"
-    method="POST"
-    language="en-AU"
-  >
-    ${micahSayLine("I'm listening.")}
-  </Gather>
-  ${micahSayLine("I'll hang up — feel free to call back anytime.")}
-  <Hangup/>
-</Response>`;
+async function buildConversationTwiml(
+  assistantLine: string,
+  gatherActionUrl: string,
+  supabase: SupabaseClient | null,
+  callSid: string,
+  assistantMp3Url: string | null
+): Promise<string> {
+  const vr = new twilio.twiml.VoiceResponse();
+  const sid = callSid || `anon-${Date.now()}`;
+  const budget = defaultElevenLabsTtsTimeoutMs();
+
+  let mainUrl: string | null = assistantMp3Url?.trim() || null;
+  let q: string | null = null;
+  let bye: string | null = null;
+
+  if (canUseElevenLabsTts(supabase) && supabase) {
+    const rest = await Promise.all([
+      mainUrl
+        ? Promise.resolve(mainUrl)
+        : elevenLabsTtsPublicMp3UrlWithTimeout(
+            supabase,
+            assistantLine,
+            sid,
+            budget
+          ),
+      elevenLabsTtsPublicMp3UrlWithTimeout(
+        supabase,
+        "Anything else I can help with?",
+        sid,
+        budget
+      ),
+      elevenLabsTtsPublicMp3UrlWithTimeout(
+        supabase,
+        "Thanks for calling — goodbye for now.",
+        sid,
+        budget
+      ),
+    ]);
+    mainUrl = rest[0];
+    q = rest[1];
+    bye = rest[2];
+  }
+
+  playOrPollyOliviaSay(vr, mainUrl, assistantLine);
+
+  const gather = vr.gather({
+    input: ["speech"],
+    timeout: 15,
+    speechTimeout: "auto",
+    action: gatherActionUrl,
+    method: "POST",
+    language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
+  });
+  gatherPlayOrPollyOliviaSay(
+    gather,
+    q,
+    "Anything else I can help with?"
+  );
+
+  playOrPollyOliviaSay(vr, bye, "Thanks for calling — goodbye for now.");
+  vr.hangup();
+  return vr.toString();
 }
 
 export async function GET() {
@@ -101,8 +174,9 @@ export async function GET() {
 export async function POST(req: Request): Promise<Response> {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
-    return twimlResponse(
-      plainErrorTwiML("Micah isn't configured yet — please try again later."),
+    return plainErrorTwiMLResponse(
+      "",
+      "Micah isn't configured yet — please try again later.",
       "[micah/process] no-openai"
     );
   }
@@ -111,12 +185,19 @@ export async function POST(req: Request): Promise<Response> {
   try {
     form = await req.formData();
   } catch {
-    return twimlResponse(
-      plainErrorTwiML("Invalid request."),
+    return plainErrorTwiMLResponse(
+      "",
+      "Invalid request.",
       "[micah/process] bad-form"
     );
   }
 
+  console.log(
+    "[DirectiveOS-Debug] Call from:",
+    form.get("From"),
+    "To:",
+    form.get("To")
+  );
   console.log("Incoming Twilio:", Object.fromEntries(form.entries()));
 
   const get = (k: string) => {
@@ -126,6 +207,7 @@ export async function POST(req: Request): Promise<Response> {
 
   const userInput = get("SpeechResult").trim();
   const toNumber = get("To");
+  const callSid = get("CallSid").trim();
 
   const supabase = getServiceSupabaseOrNull();
   let dbClient: MicahClientRow | null = null;
@@ -138,27 +220,36 @@ export async function POST(req: Request): Promise<Response> {
 
   console.log("Matched client:", matchedFromDb ? dbClient : client);
 
-  const base = safeBuildPublicBaseUrl(req);
+  const base = resolveVoiceActionBaseUrl(req);
   const gatherActionUrl = `${base}/api/process`;
+  console.log("[Micah-Audit] Gather action URL:", gatherActionUrl);
 
-  const greeting = `Hi, welcome to ${client.agency_name}. This is Micah speaking. How can I help you today?`;
+  const greeting = `G'day! You've reached ${client.agency_name}, I'm Micah. How can I help you today?`;
 
   if (!userInput) {
-    return twimlResponse(
-      openingTwiml(greeting, gatherActionUrl),
-      "[micah/process] opening"
+    const twiml = await buildOpeningTwiml(
+      greeting,
+      gatherActionUrl,
+      supabase,
+      callSid
     );
+    return twimlResponse(twiml, "[micah/process] opening");
   }
 
   const openai = new OpenAI({ apiKey });
-  let assistantText =
-    "Sorry, I didn't catch that. Can you please repeat your details?";
+  let assistantText = "Sorry, could you please repeat that?";
 
   try {
     const completion = await openai.chat.completions.create({
       model: MODEL,
       messages: [
-        { role: "system", content: buildSystemPrompt(client.agency_name) },
+        {
+          role: "system",
+          content: buildMicahDirectiveProcessSystemPrompt(
+            client.agency_name,
+            toNumber
+          ),
+        },
         { role: "user", content: userInput },
       ],
       temperature: 0.6,
@@ -167,7 +258,14 @@ export async function POST(req: Request): Promise<Response> {
     assistantText =
       completion.choices[0]?.message?.content?.trim() ?? assistantText;
   } catch (e) {
-    console.error("[micah/process] OpenAI:", e);
+    const err = e as Error & { status?: number; code?: string };
+    console.error("[micah/process] OpenAI chat failed:", {
+      message: err?.message ?? String(e),
+      name: err?.name,
+      status: err?.status,
+      code: err?.code,
+      stack: err?.stack?.split("\n").slice(0, 4).join(" | "),
+    });
   }
 
   if (matchedFromDb && supabase && dbClient && isUuid(dbClient.id)) {
@@ -189,7 +287,7 @@ export async function POST(req: Request): Promise<Response> {
       const resend = new Resend(resendKey);
       await resend.emails.send({
         from: resendFrom,
-        to: notifyTo,
+        to: [notifyTo],
         subject: `New lead for ${client.agency_name}`,
         text: userInput,
       });
@@ -198,8 +296,22 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  return twimlResponse(
-    conversationTwiml(assistantText, gatherActionUrl),
-    "[micah/process] ok"
+  let assistantMp3Url: string | null = null;
+  if (canUseElevenLabsTts(supabase)) {
+    assistantMp3Url = await elevenLabsTtsPublicMp3UrlWithTimeout(
+      supabase,
+      assistantText,
+      callSid || `anon-${Date.now()}`,
+      defaultElevenLabsTtsTimeoutMs()
+    );
+  }
+
+  const twiml = await buildConversationTwiml(
+    assistantText,
+    gatherActionUrl,
+    supabase,
+    callSid,
+    assistantMp3Url
   );
+  return twimlResponse(twiml, "[micah/process] ok");
 }

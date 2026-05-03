@@ -1,3 +1,6 @@
+# fly.toml — **OpenAI Realtime bridge** (`micah-realtime-bridge`, root Dockerfile).
+# Next.js **micah-web** has its own `micah-web/fly.toml` + `micah-web/Dockerfile`.
+#
 # fly.toml app configuration file generated for micah-bridge on 2026-05-02T23:17:14+10:00
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.

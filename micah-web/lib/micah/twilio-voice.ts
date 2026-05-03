@@ -1,30 +1,44 @@
-import { escapeXml } from "@/lib/twiml";
-
-type TwilioVoice = import("twilio/lib/twiml/VoiceResponse");
-
 /**
- * Twilio `<Say>` fallback when Cedar TTS is unavailable — sweet, young Australian Polly voice.
- * Override with MICAH_POLLY_VOICE (e.g. Polly.Nicole) if Olivia is unavailable in your region.
+ * Twilio Voice: Gather uses `en-AU` for speech recognition. Spoken output prefers ElevenLabs `<Play>`,
+ * with **Polly.Olivia** + **en-AU** fallback (Directive OS — never implicit male / generic Twilio `<Say>` defaults).
  */
 
+import twilio from "twilio";
+
+/** Speech recognition language for `<Gather>` (STT). */
 export const MICAH_SAY_LANGUAGE = "en-AU";
 
-/** Default Nicole matches `MICAH_SAY_LANGUAGE` en-AU (Olivia is often en-US-only → Twilio 13520 Invalid text). */
-export function micahPollyVoice(): string {
-  return process.env.MICAH_POLLY_VOICE?.trim() || "Polly.Nicole";
-}
+type TwilioVoice = import("twilio/lib/twiml/VoiceResponse");
+type GatherInstance = ReturnType<TwilioVoice["gather"]>;
 
-/** Twilio Node SDK `say()` / nested `gather.say()` attributes (env voice string is widened to `SayVoice`). */
-export function micahSayAttributes(): TwilioVoice["SayAttributes"] {
+/** Explicit Australian female Polly voice — used whenever `<Play>` URL is unavailable. */
+export function micahDirectiveOsSayAttributes(): TwilioVoice["SayAttributes"] {
   return {
-    voice: micahPollyVoice() as TwilioVoice["SayVoice"],
+    voice: "Polly.Olivia",
     language: MICAH_SAY_LANGUAGE as TwilioVoice["SayLanguage"],
   };
 }
 
-/** Single `<Say>` line with Micah’s Polly voice + Australian English. */
-export function micahSayLine(text: string): string {
-  const v = escapeXml(micahPollyVoice());
-  const lang = escapeXml(MICAH_SAY_LANGUAGE);
-  return `<Say voice="${v}" language="${lang}">${escapeXml(text)}</Say>`;
+type VoiceResponseInstance = InstanceType<typeof twilio.twiml.VoiceResponse>;
+
+/** `<Play>` when URL exists; otherwise `<Say voice="Polly.Olivia" language="en-AU">` — never empty audio path. */
+export function playOrPollyOliviaSay(
+  vr: VoiceResponseInstance,
+  mp3Url: string | null | undefined,
+  fallbackSayText: string
+): void {
+  const u = mp3Url?.trim();
+  if (u) vr.play(u);
+  else vr.say(micahDirectiveOsSayAttributes(), fallbackSayText);
+}
+
+/** Same as {@link playOrPollyOliviaSay} for verbs nested under `<Gather>`. */
+export function gatherPlayOrPollyOliviaSay(
+  gather: GatherInstance,
+  mp3Url: string | null | undefined,
+  fallbackSayText: string
+): void {
+  const u = mp3Url?.trim();
+  if (u) gather.play(u);
+  else gather.say(micahDirectiveOsSayAttributes(), fallbackSayText);
 }

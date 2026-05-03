@@ -8,9 +8,18 @@ import {
   upsample8kTo24k,
 } from "./audio.js";
 import { saveLeadFromCall } from "./leadWriter.js";
-import { MICAH_REALTIME_INSTRUCTIONS } from "./persona.js";
+import { buildMicahRealtimeInstructions } from "./persona.js";
 
 const OPENAI_BETA = process.env.OPENAI_BETA_HEADER ?? "realtime=v1";
+
+/** Preset output voice for Realtime (`cedar`, `marin`, `shimmer`, `alloy`, `echo`, …). Same Fly secret for every call. */
+const REALTIME_VOICE =
+  process.env.OPENAI_REALTIME_VOICE?.trim().toLowerCase() || "cedar";
+
+/** Synthetic user line so the model speaks first (server VAD alone waits for caller audio → silence). */
+const OPENING_NUDGE_TEXT =
+  process.env.MICAH_REALTIME_OPENING_NUDGE?.trim() ||
+  "Call connected. Speak the exact opening greeting from your instructions in full, then listen to the caller.";
 
 type TwilioStart = {
   event: "start";
@@ -25,6 +34,23 @@ type TwilioMedia = {
   event: "media";
   media: { payload: string; track: string };
 };
+
+/** Pick base64 PCM from any known Realtime output-audio event shape. */
+function extractAssistantAudioBase64(
+  typ: string,
+  ev: Record<string, unknown>
+): string | undefined {
+  const isOutAudio =
+    typ === "response.audio.delta" ||
+    typ === "response.output_audio.delta" ||
+    typ.includes("output_audio.delta");
+  if (isOutAudio && typeof ev.delta === "string") return ev.delta;
+  if (typ === "response.audio.delta" && typeof ev.audio === "string")
+    return ev.audio;
+  const ob = ev.output_audio as Record<string, unknown> | undefined;
+  if (ob && typeof ob.delta === "string") return ob.delta as string;
+  return undefined;
+}
 
 /**
  * One Twilio WebSocket + one OpenAI Realtime WebSocket, bridged.
@@ -41,6 +67,8 @@ export function attachCallSession(
   let toNum = "";
   let transcriptChunks: string[] = [];
   let sessionReady = false;
+  let openingTurnSent = false;
+  let outboundAudioChunks = 0;
   const queuedTwilioAudio: string[] = [];
 
   function appendTranscriptFromOpenAI(ev: Record<string, unknown>) {
@@ -68,19 +96,43 @@ export function attachCallSession(
 
   function sendSessionUpdate() {
     if (!openai || openai.readyState !== WebSocket.OPEN) return;
-    /** Preview models (`gpt-4o-realtime-preview`) accept flat audio + voice; Cedar matches OpenAI docs / video demos. */
+    console.log("[openai] session.update model=", model, "voice=", REALTIME_VOICE);
+    /** Preview models (`gpt-4o-realtime-preview`) accept flat `voice` + modalities (see OPENAI_REALTIME_VOICE). */
     const payload = {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
-        instructions: MICAH_REALTIME_INSTRUCTIONS,
-        voice: "cedar",
+        instructions: buildMicahRealtimeInstructions(toNum),
+        voice: REALTIME_VOICE,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
         turn_detection: { type: "server_vad" },
       },
     };
     openai.send(JSON.stringify(payload));
+  }
+
+  /** After session is ready: nudge the model to produce an immediate greeting (otherwise Realtime waits for user speech). */
+  function sendOpeningTurn() {
+    if (!openai || openai.readyState !== WebSocket.OPEN || openingTurnSent) return;
+    openingTurnSent = true;
+    console.log("[openai] opening turn — synthetic user message + response.create");
+    try {
+      openai.send(
+        JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: OPENING_NUDGE_TEXT }],
+          },
+        })
+      );
+      openai.send(JSON.stringify({ type: "response.create" }));
+    } catch (e) {
+      console.error("[openai] sendOpeningTurn failed:", e);
+      openingTurnSent = false;
+    }
   }
 
   function flushQueuedAudio() {
@@ -132,29 +184,30 @@ export function attachCallSession(
             sessionReady = true;
             flushQueuedAudio();
           }
+          sendOpeningTurn();
         }, 750);
         return;
       }
       if (typ === "session.updated") {
         sessionReady = true;
         flushQueuedAudio();
+        sendOpeningTurn();
         return;
       }
       if (typ === "error") {
-        console.error("[openai] error event:", JSON.stringify(ev));
+        const errObj = ev.error as Record<string, unknown> | undefined;
+        const msg =
+          (typeof errObj?.message === "string" && errObj.message) ||
+          (typeof ev.message === "string" && ev.message) ||
+          JSON.stringify(ev);
+        console.error("[openai] error event:", msg);
         return;
       }
 
       appendTranscriptFromOpenAI(ev);
 
-      /** Assistant PCM16 audio → μ-law 8k for Twilio */
-      let audioB64: string | undefined;
-      if (typ === "response.audio.delta" && typeof ev.delta === "string")
-        audioB64 = ev.delta;
-      else if (typ === "response.output_audio.delta" && typeof ev.delta === "string")
-        audioB64 = ev.delta;
-      else if (typ === "response.audio.delta" && typeof (ev as { audio?: string }).audio === "string")
-        audioB64 = (ev as { audio?: string }).audio;
+      /** Assistant PCM16 base64 — event names vary by Realtime API revision. */
+      let audioB64 = extractAssistantAudioBase64(typ, ev);
 
       if (audioB64 && streamSid && twilioWs.readyState === WebSocket.OPEN) {
         try {
@@ -168,6 +221,10 @@ export function attachCallSession(
               media: { payload: mulawBuf.toString("base64") },
             })
           );
+          outboundAudioChunks += 1;
+          if (outboundAudioChunks === 1) {
+            console.log("[bridge] first outbound audio chunk sent to Twilio");
+          }
         } catch (e) {
           console.warn("[bridge] outbound audio chunk failed:", e);
         }

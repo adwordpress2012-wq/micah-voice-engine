@@ -13,12 +13,16 @@ Your Next.js app on Vercel still serves **`/api/voice/incoming`** TwiML; the **s
 |----------|----------|--------|
 | `OPENAI_API_KEY` | Yes | Same project key as Micah web. |
 | `OPENAI_REALTIME_MODEL` | No | Default `gpt-4o-realtime-preview`. Pin a dated snapshot in production if you prefer. |
+| `OPENAI_REALTIME_VOICE` | No | Default **`cedar`**. Other Realtime presets include **`marin`**, **`shimmer`**, **`alloy`**, **`echo`**. (There is no **Skyla** — often people mean **`shimmer`**.) Set on Fly so every call uses the same voice. |
 | `PORT` | No | Defaults **8080** in the Dockerfile / Fly; locally you can use `8787` (`npm run dev` / ngrok). |
 | `MICAH_BRIDGE_SECRET` | **Strongly recommended** | Random string; must match Vercel **`MICAH_BRIDGE_SECRET`** (see **Realtime bridge token** below). |
 | `SUPABASE_URL` | For leads | Same as micah-web. |
 | `SUPABASE_SERVICE_ROLE_KEY` | For leads | Service role (server only). |
 | `OPENAI_TRANSLATE_MODEL` | No | Default `gpt-4o-mini` — normalises transcript to English for `leads.raw_text`. |
 | `OPENAI_BETA_HEADER` | Rarely | Default `realtime=v1` if OpenAI still expects beta header for your account. |
+| `MICAH_REALTIME_OPENING_NUDGE` | No | Synthetic “user” text for `conversation.item.create` + `response.create` so the model **speaks first** (not set on Vercel). |
+
+On **micah-web**, optional **`MICAH_REALTIME_PRECONNECT_SAY`** — short Polly line **before** `<Connect><Stream>` (see `.env.example`).
 
 ## Realtime bridge token (Vercel ↔ Fly)
 
@@ -110,4 +114,27 @@ vercel deploy --prebuilt --prod --force
 
 Or trigger **Redeploy** from the Vercel dashboard with **“Use existing Build Cache”** disabled.
 
-**Bridge service:** redeploy the container/host after `git push`; most platforms have a **“Restart”** or **“Deploy latest”** button.
+**Bridge (Fly.io)** — from repo root or `micah-realtime-bridge/` (install CLI: `winget install Superfly.flyctl` or PowerShell `iwr https://fly.io/install.ps1 -useb | iex`):
+
+```powershell
+cd micah-realtime-bridge
+fly deploy
+```
+
+### Avoid cold starts (5–10 s answer delay)
+
+Fly **auto-stops** idle machines when `min_machines_running = 0` (see repo root `fly.toml`). The next inbound call pays a **cold-start tax** while the machine boots.
+
+**Pick one:**
+
+1. **Always-on machine (simplest for production voice)** — in `fly.toml` under `[http_service]` set **`min_machines_running = 1`**. You keep one VM warm; cost scales with Fly pricing for always-on RAM/CPU.
+
+2. **Keep scale-to-zero but wake periodically** — HTTP ping the bridge periodically so it rarely sleeps:
+   ```bash
+   curl -fsS "https://YOUR_APP.fly.dev/health" >/dev/null
+   ```
+   Run every **2–5 minutes** from an external cron (e.g. cron-job.org, GitHub Actions `schedule`, or your own monitor). This reduces cold hits but does **not** guarantee zero wake latency under Fly load.
+
+3. **Heavy traffic** — raise `min_machines_running` or rely on steady call volume to keep the machine hot.
+
+After editing `fly.toml`, run **`fly deploy`** so the scale settings apply.

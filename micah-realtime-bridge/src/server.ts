@@ -10,6 +10,8 @@ const BRIDGE_SECRET = process.env.MICAH_BRIDGE_SECRET?.trim();
 const OPENAI_KEY = process.env.OPENAI_API_KEY?.trim();
 const MODEL =
   process.env.OPENAI_REALTIME_MODEL?.trim() ?? "gpt-4o-realtime-preview";
+const REALTIME_VOICE =
+  process.env.OPENAI_REALTIME_VOICE?.trim().toLowerCase() || "cedar";
 
 const app = express();
 app.use(express.json());
@@ -19,6 +21,7 @@ app.get("/health", (_req, res) => {
     ok: true,
     service: "micah-realtime-bridge",
     model: MODEL,
+    voice: REALTIME_VOICE,
     hasOpenAI: Boolean(OPENAI_KEY),
   });
 });
@@ -63,7 +66,9 @@ wss.on("connection", (twilioWs: WebSocket) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`[bridge] listening ${PORT} — ws path /twilio`);
+  console.log(
+    `[bridge] listening ${PORT} — ws path /twilio — realtime voice=${REALTIME_VOICE} model=${MODEL}`
+  );
   if (!OPENAI_KEY) {
     console.warn("[bridge] WARN: OPENAI_API_KEY not set");
   }
