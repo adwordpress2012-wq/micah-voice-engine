@@ -3,15 +3,30 @@ import { escapeXml } from "@/lib/twiml";
 type TwilioVoice = import("twilio/lib/twiml/VoiceResponse");
 
 /**
- * Twilio `<Say>` fallback when Cedar TTS is unavailable — sweet, young Australian Polly voice.
- * Override with MICAH_POLLY_VOICE (e.g. Polly.Nicole) if Olivia is unavailable in your region.
+ * Twilio `<Say>` fallback used only when ElevenLabs is unavailable.
+ * Hard rule: ALWAYS a female en-AU voice. Male/neutral overrides are rejected.
  */
 
 export const MICAH_SAY_LANGUAGE = "en-AU";
 
-/** Polly.Olivia is the AWS Neural en-AU female voice. Nicole is deprecated and causes Twilio to fall back to "man". */
+/** Whitelist of female en-AU Polly voices. Anything else falls back to Polly.Olivia. */
+const FEMALE_AU_POLLY_VOICES = new Set([
+  "Polly.Olivia",   // Neural en-AU female (preferred)
+  "Polly.Nicole",   // Standard en-AU female (deprecated, kept as escape hatch)
+]);
+
+/** Polly.Olivia is the AWS Neural en-AU female voice. Any non-female-AU override is rejected. */
 export function micahPollyVoice(): string {
-  return process.env.MICAH_POLLY_VOICE?.trim() || "Polly.Olivia";
+  const override = process.env.MICAH_POLLY_VOICE?.trim();
+  if (override && FEMALE_AU_POLLY_VOICES.has(override)) {
+    return override;
+  }
+  if (override) {
+    console.warn(
+      `[micah/voice] MICAH_POLLY_VOICE="${override}" rejected — not a female en-AU voice. Forcing Polly.Olivia.`
+    );
+  }
+  return "Polly.Olivia";
 }
 
 /** Twilio Node SDK `say()` / nested `gather.say()` attributes (env voice string is widened to `SayVoice`). */

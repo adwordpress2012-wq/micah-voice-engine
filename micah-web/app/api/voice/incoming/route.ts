@@ -41,6 +41,18 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
+    console.log("[micah/debug] incoming start:", {
+      voiceEngine: VOICE_ENGINE || "(gather default)",
+      hasElevenLabsKey: !!process.env.ELEVENLABS_API_KEY,
+      hasBucket: !!process.env.SUPABASE_TTS_BUCKET,
+      voiceId:
+        process.env.ELEVENLABS_VOICE_ID?.trim() ||
+        process.env.AUSSIE_MICAH?.trim() ||
+        "4Nz4vG2f9omkfcS8r4PJ (Aussie Micah default)",
+      pollyFallback: process.env.MICAH_POLLY_VOICE?.trim() || "Polly.Olivia (default)",
+      appUrl: process.env.NEXT_PUBLIC_APP_URL?.trim() || "(not set — falling back to headers)",
+    });
+
     let form: FormData;
     try {
       form = await request.formData();
@@ -99,8 +111,18 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const base = safeBuildPublicBaseUrl(request);
-    const processUrl = `${base}/api/voice/process`;
+    // NEXT_PUBLIC_APP_URL always wins so <Gather action> never points to a preview deployment.
+    const base =
+      process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ||
+      safeBuildPublicBaseUrl(request);
+
+    // Demo number routing: if MICAH_DEMO_NUMBER matches the dialled `To`, persona
+    // unlocks real-estate topics. Main number → ?mode=main (default behavior).
+    const demoNumber = process.env.MICAH_DEMO_NUMBER?.trim();
+    const toNumber = formString(form, "To");
+    const isDemo = !!demoNumber && !!toNumber && toNumber === demoNumber;
+    const processUrl = `${base}/api/voice/process?mode=${isDemo ? "demo" : "main"}`;
+    console.log("[micah/debug] persona mode:", { to: toNumber || "(none)", isDemo });
 
     const twiml = new twilio.twiml.VoiceResponse();
     const gather = twiml.gather({
@@ -110,13 +132,14 @@ export async function POST(request: NextRequest) {
       action: processUrl,
       method: "POST",
       language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
+      // POST to the action URL even when no speech was captured so /process re-prompts
+      // gracefully instead of Twilio falling through and ending the call after the greeting.
+      actionOnEmptyResult: true,
     });
     gather.say(micahSayAttributes(), MICAH_OPENING_GREETING);
-    twiml.say(
-      micahSayAttributes(),
-      "I'll hang up for now — feel free to call back when you're ready. Bye!"
-    );
-    twiml.hangup();
+    // Defensive fallback: if Twilio still falls through (gather error), redirect to /process
+    // so it handles the empty-speech path with a soft re-prompt instead of hanging up.
+    twiml.redirect({ method: "POST" }, processUrl);
 
     return new Response(twiml.toString(), {
       status: 200,
