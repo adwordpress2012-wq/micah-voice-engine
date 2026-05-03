@@ -1,0 +1,31 @@
+# Micah web (Next.js standalone) on Fly.io — Directive OS voice + webhooks.
+#
+# First deploy (once): cd micah-web && fly launch --copy-config --name YOUR_APP_NAME
+# Then set secrets (see README “Fly.io (micah-web)”): fly secrets set ...
+# Deploy:            cd micah-web && fly deploy
+#
+# Repo root `fly.toml` + Dockerfile build **micah-realtime-bridge** only — not this app.
+
+app = "micah-web"
+primary_region = "syd"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/api/voice/diagnostic"
+
+[[vm]]
+  memory = "512mb"
+  cpus = 1
