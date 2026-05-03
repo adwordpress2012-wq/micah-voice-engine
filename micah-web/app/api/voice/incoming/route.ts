@@ -2,6 +2,7 @@ import twilio from "twilio";
 import type { NextRequest } from "next/server";
 import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
 import { MICAH_SAY_LANGUAGE, micahSayAttributes } from "@/lib/micah/twilio-voice";
+import { MICAH_OPENING_GREETING } from "@/lib/micah/micah-voice-persona";
 import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
 
@@ -110,10 +111,7 @@ export async function POST(request: NextRequest) {
       method: "POST",
       language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
     });
-    gather.say(
-      micahSayAttributes(),
-      "Hi! This is Micah, your AI receptionist. How can I help you today?"
-    );
+    gather.say(micahSayAttributes(), MICAH_OPENING_GREETING);
     twiml.say(
       micahSayAttributes(),
       "I'll hang up for now — feel free to call back when you're ready. Bye!"
