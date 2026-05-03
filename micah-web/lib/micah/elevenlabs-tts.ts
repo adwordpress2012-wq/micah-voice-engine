@@ -34,11 +34,16 @@ export async function elevenLabsTtsPublicMp3Url(
     return null;
   }
   const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
-  const voiceId = process.env.ELEVENLABS_VOICE_ID?.trim();
-  if (!apiKey || !voiceId) {
-    console.warn("[micah/elevenlabs] ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID missing");
+  // Accept ELEVENLABS_VOICE_ID or AUSSIE_MICAH; fall back to the Aussie Micah voice ID.
+  const voiceId =
+    process.env.ELEVENLABS_VOICE_ID?.trim() ||
+    process.env.AUSSIE_MICAH?.trim() ||
+    "4Nz4vG2f9omkfcS8r4PJ";
+  if (!apiKey) {
+    console.warn("[micah/elevenlabs] ELEVENLABS_API_KEY missing");
     return null;
   }
+  console.log("[micah/elevenlabs] using voice:", voiceId);
   if (!supabase) {
     return null;
   }
