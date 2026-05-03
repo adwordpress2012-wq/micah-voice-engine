@@ -8,11 +8,8 @@ import {
   clampTranscriptForModel,
   sanitizeForPollySay,
 } from "@/lib/micah/micah-voice-persona";
-import {
-  MICAH_SAY_LANGUAGE,
-  micahSayAttributes,
-} from "@/lib/micah/twilio-voice";
-import { elevenLabsTtsPublicMp3Url } from "@/lib/micah/elevenlabs-tts";
+import { MICAH_SAY_LANGUAGE } from "@/lib/micah/twilio-voice";
+import { applyMicahVoice, micahVoice, type MicahVoiceResult } from "@/lib/micah/voice-output";
 import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
@@ -33,16 +30,12 @@ function formString(form: FormData, key: string): string {
 }
 
 function continuationTwiML(
-  aiReply: string,
-  processUrl: string,
-  audioUrl: string | null
+  reply: MicahVoiceResult,
+  followup: MicahVoiceResult,
+  processUrl: string
 ): string {
   const vr = new twilio.twiml.VoiceResponse();
-  if (audioUrl) {
-    vr.play(audioUrl);
-  } else {
-    vr.say(micahSayAttributes(), aiReply);
-  }
+  applyMicahVoice(vr, reply);
   const gather = vr.gather({
     input: ["speech"],
     timeout: 15,
@@ -51,24 +44,22 @@ function continuationTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
     // Stay in the conversation: post to /process even on silence so Micah re-prompts
-    // softly instead of Twilio falling through and ending the call.
+    // instead of Twilio falling through and ending the call.
     actionOnEmptyResult: true,
   });
-  gather.say(
-    micahSayAttributes(),
-    `${MICAH_GATHER_FOLLOWUP_PROMPT} I'm listening.`
-  );
+  applyMicahVoice(gather, followup);
   // Defensive: never hang up on fall-through. Loop back to /process for re-prompt.
   vr.redirect({ method: "POST" }, processUrl);
   return vr.toString();
 }
 
-function emptySpeechTwiML(processUrl: string): string {
+function emptySpeechTwiML(
+  apology: MicahVoiceResult,
+  silencePrompt: MicahVoiceResult,
+  processUrl: string
+): string {
   const vr = new twilio.twiml.VoiceResponse();
-  vr.say(
-    micahSayAttributes(),
-    "Sorry, I missed that. Could you repeat?"
-  );
+  applyMicahVoice(vr, apology);
   const gather = vr.gather({
     input: ["speech"],
     timeout: 15,
@@ -78,10 +69,7 @@ function emptySpeechTwiML(processUrl: string): string {
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
     actionOnEmptyResult: true,
   });
-  gather.say(
-    micahSayAttributes(),
-    "Take your time — I'm right here."
-  );
+  applyMicahVoice(gather, silencePrompt);
   // Defensive: never hang up on fall-through. Loop back to /process for re-prompt.
   vr.redirect({ method: "POST" }, processUrl);
   return vr.toString();
@@ -101,7 +89,7 @@ async function handleProcess(request: Request) {
   console.log("[micah/debug] EL Status:", {
     hasKey: !!process.env.ELEVENLABS_API_KEY,
     hasBucket: !!process.env.SUPABASE_TTS_BUCKET,
-    pollyVoice: process.env.MICAH_POLLY_VOICE?.trim() || "Polly.Olivia (default)",
+    hasFallbackMp3: !!process.env.MICAH_FALLBACK_MP3_URL?.trim(),
     appUrl: process.env.NEXT_PUBLIC_APP_URL?.trim() || "(not set — falling back to headers)",
   });
 
@@ -152,9 +140,26 @@ async function handleProcess(request: Request) {
   const processUrl = `${base}/api/voice/process?mode=${mode}`;
   console.log("[micah/debug] process mode:", mode);
 
+  const supabase = getServiceSupabaseOrNull();
+  const sidForTts = callSid || `nosid-${Date.now()}`;
+
   if (!userSpeechRaw) {
+    const [apology, silencePrompt] = await Promise.all([
+      micahVoice({
+        text: "Sorry, could you please repeat that?",
+        callSid: `apology-${sidForTts}`,
+        supabase,
+        label: "process/empty-apology",
+      }),
+      micahVoice({
+        text: "Take your time — I'm right here.",
+        callSid: `silence-${sidForTts}`,
+        supabase,
+        label: "process/silence-prompt",
+      }),
+    ]);
     return twimlResponse(
-      emptySpeechTwiML(processUrl),
+      emptySpeechTwiML(apology, silencePrompt, processUrl),
       "[micah/voice/process] empty-speech"
     );
   }
@@ -187,7 +192,6 @@ async function handleProcess(request: Request) {
       "Sorry — I'm having a tiny glitch here. Could you repeat that for me?";
   }
 
-  const supabase = getServiceSupabaseOrNull();
   if (supabase) {
     try {
       await supabase.from("call_logs").insert({
@@ -233,18 +237,25 @@ async function handleProcess(request: Request) {
     }
   }
 
-  // Synthesize Aussie Micah via ElevenLabs → upload to Supabase → <Play> the public MP3 URL.
-  // On any failure (missing keys, upload error, API error) returns null and we fall back to Polly.Olivia <Say>.
-  let audioUrl: string | null = null;
-  try {
-    audioUrl = await elevenLabsTtsPublicMp3Url(supabase, aiReply, callSid || `nosid-${Date.now()}`);
-    console.log("[micah/voice/process] tts result:", { audioUrl: audioUrl ? "ok" : "null (Polly fallback)" });
-  } catch (e) {
-    console.error("[micah/voice/process] elevenlabs (non-fatal, falling back to Polly):", e);
-  }
+  // Synthesize Aussie Micah via ElevenLabs for both the AI reply and the in-gather follow-up.
+  // No Polly: on failure, micahVoice returns the pre-recorded MP3 (if MICAH_FALLBACK_MP3_URL set) or silence.
+  const [reply, followup] = await Promise.all([
+    micahVoice({
+      text: aiReply,
+      callSid: `reply-${sidForTts}`,
+      supabase,
+      label: "process/reply",
+    }),
+    micahVoice({
+      text: `${MICAH_GATHER_FOLLOWUP_PROMPT} I'm listening.`,
+      callSid: `followup-${sidForTts}`,
+      supabase,
+      label: "process/followup",
+    }),
+  ]);
 
   try {
-    const twiml = continuationTwiML(aiReply, processUrl, audioUrl);
+    const twiml = continuationTwiML(reply, followup, processUrl);
     return twimlResponse(twiml, "[micah/voice/process] ok");
   } catch (e) {
     console.error("[micah/voice/process] twiml:", e);

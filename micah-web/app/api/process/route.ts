@@ -1,10 +1,11 @@
 import OpenAI from "openai";
+import twilio from "twilio";
 import { Resend } from "resend";
 import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
-import { micahSayLine } from "@/lib/micah/twilio-voice";
+import { applyMicahVoice, micahVoice, type MicahVoiceResult } from "@/lib/micah/voice-output";
+import { buildMicahSystemPrompt, MICAH_OPENING_GREETING } from "@/lib/micah/micah-voice-persona";
 import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
-import { escapeXml } from "@/lib/twiml";
 import {
   isUuid,
   lookupClientByTwilioTo,
@@ -18,28 +19,13 @@ export const dynamic = "force-dynamic";
 const MODEL = process.env.OPENAI_MICAH_PROCESS_MODEL ?? "gpt-4o-mini";
 
 function buildSystemPrompt(agencyName: string): string {
-  return `You are Micah, a young, vibrant Australian real estate receptionist.
-
-You work for ${agencyName}.
-
-STRICT RULES:
-
-* Follow NSW Property Services Act 2022 guidelines
-* DO NOT provide property prices or price guides
-* If asked about price, say:
-  "I'll have the listing agent send you the full details shortly."
-
-Voice:
-
-* Friendly, confident, professional
-* Keep responses short
-
-Goal:
-
-* Capture name
-* Budget (if provided)
-* Timeline
-* Property type`;
+  // Re-uses the canonical Micah persona so all routes share the same identity.
+  // /api/process is the legacy multi-tenant webhook used by per-client numbers; treat
+  // it as a "demo" line so Micah can engage if a caller raises real-estate topics
+  // (e.g. the demo number 02 5950 6382 routed here historically). Agency name is
+  // surfaced in the prompt via MICAH_FALLBACK_AGENCY_NAME at module load time.
+  void agencyName;
+  return buildMicahSystemPrompt({ mode: "demo" });
 }
 
 function fallbackClient(): MicahClientRow {
@@ -53,42 +39,46 @@ function fallbackClient(): MicahClientRow {
   };
 }
 
-function conversationTwiml(assistantLine: string, gatherActionUrl: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${micahSayLine(assistantLine)}
-  <Gather
-    input="speech"
-    timeout="15"
-    speechTimeout="auto"
-    action="${escapeXml(gatherActionUrl)}"
-    method="POST"
-    language="en-AU"
-  >
-    ${micahSayLine("Anything else I can help with?")}
-  </Gather>
-  ${micahSayLine("Thanks for calling — goodbye for now.")}
-  <Hangup/>
-</Response>`;
+function conversationTwiml(
+  assistant: MicahVoiceResult,
+  followup: MicahVoiceResult,
+  gatherActionUrl: string
+): string {
+  const vr = new twilio.twiml.VoiceResponse();
+  applyMicahVoice(vr, assistant);
+  const gather = vr.gather({
+    input: ["speech"],
+    timeout: 15,
+    speechTimeout: "auto",
+    action: gatherActionUrl,
+    method: "POST",
+    language: "en-AU",
+    actionOnEmptyResult: true,
+  });
+  applyMicahVoice(gather, followup);
+  vr.redirect({ method: "POST" }, gatherActionUrl);
+  return vr.toString();
 }
 
-function openingTwiml(greeting: string, gatherActionUrl: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  ${micahSayLine(greeting)}
-  <Gather
-    input="speech"
-    timeout="15"
-    speechTimeout="auto"
-    action="${escapeXml(gatherActionUrl)}"
-    method="POST"
-    language="en-AU"
-  >
-    ${micahSayLine("I'm listening.")}
-  </Gather>
-  ${micahSayLine("I'll hang up — feel free to call back anytime.")}
-  <Hangup/>
-</Response>`;
+function openingTwiml(
+  greeting: MicahVoiceResult,
+  listening: MicahVoiceResult,
+  gatherActionUrl: string
+): string {
+  const vr = new twilio.twiml.VoiceResponse();
+  applyMicahVoice(vr, greeting);
+  const gather = vr.gather({
+    input: ["speech"],
+    timeout: 15,
+    speechTimeout: "auto",
+    action: gatherActionUrl,
+    method: "POST",
+    language: "en-AU",
+    actionOnEmptyResult: true,
+  });
+  applyMicahVoice(gather, listening);
+  vr.redirect({ method: "POST" }, gatherActionUrl);
+  return vr.toString();
 }
 
 export async function GET() {
@@ -138,14 +128,31 @@ export async function POST(req: Request): Promise<Response> {
 
   console.log("Matched client:", matchedFromDb ? dbClient : client);
 
-  const base = safeBuildPublicBaseUrl(req);
+  // NEXT_PUBLIC_APP_URL always wins so <Gather action> never points to a preview deployment.
+  const base =
+    process.env.NEXT_PUBLIC_APP_URL?.trim().replace(/\/$/, "") ||
+    safeBuildPublicBaseUrl(req);
   const gatherActionUrl = `${base}/api/process`;
 
-  const greeting = `Hi, welcome to ${client.agency_name}. This is Micah speaking. How can I help you today?`;
+  const callSidForTts = get("CallSid") || `nosid-${Date.now()}`;
 
   if (!userInput) {
+    const [greetingAudio, listening] = await Promise.all([
+      micahVoice({
+        text: MICAH_OPENING_GREETING,
+        callSid: `greeting-${callSidForTts}`,
+        supabase,
+        label: "process/greeting",
+      }),
+      micahVoice({
+        text: "I'm listening.",
+        callSid: `listening-${callSidForTts}`,
+        supabase,
+        label: "process/listening",
+      }),
+    ]);
     return twimlResponse(
-      openingTwiml(greeting, gatherActionUrl),
+      openingTwiml(greetingAudio, listening, gatherActionUrl),
       "[micah/process] opening"
     );
   }
@@ -198,8 +205,22 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
+  const [assistantAudio, followup] = await Promise.all([
+    micahVoice({
+      text: assistantText,
+      callSid: `reply-${callSidForTts}`,
+      supabase,
+      label: "process/reply",
+    }),
+    micahVoice({
+      text: "Anything else I can help with?",
+      callSid: `followup-${callSidForTts}`,
+      supabase,
+      label: "process/followup",
+    }),
+  ]);
   return twimlResponse(
-    conversationTwiml(assistantText, gatherActionUrl),
+    conversationTwiml(assistantAudio, followup, gatherActionUrl),
     "[micah/process] ok"
   );
 }
