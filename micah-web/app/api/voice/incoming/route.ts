@@ -3,8 +3,6 @@ import type { NextRequest } from "next/server";
 import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
 import { MICAH_SAY_LANGUAGE } from "@/lib/micah/twilio-voice";
 import { MICAH_OPENING_GREETING } from "@/lib/micah/micah-voice-persona";
-import { applyMicahVoice, micahVoice } from "@/lib/micah/voice-output";
-import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
 
@@ -126,16 +124,18 @@ export async function POST(request: NextRequest) {
     const processUrl = `${base}/api/voice/process?mode=${isDemo ? "demo" : "main"}`;
     console.log("[micah/debug] persona mode:", { to: toNumber || "(none)", isDemo });
 
-    // Aussie Micah greeting via ElevenLabs. NO Polly fallback — if ElevenLabs fails,
-    // micahVoice returns the pre-recorded MICAH_FALLBACK_MP3_URL or a silent pause.
-    const callSid = formString(form, "CallSid") || `nosid-${Date.now()}`;
-    const supabase = getServiceSupabaseOrNull();
-    const greeting = await micahVoice({
-      text: MICAH_OPENING_GREETING,
-      callSid: `greeting-${callSid}`,
-      supabase,
-      label: "incoming/greeting",
-    });
+    // INSTANT greeting — never await ElevenLabs here. The caller must hear a voice
+    // within 1s of pickup; ElevenLabs synthesis + Supabase upload takes 1–3s and
+    // would create perceptible silence at call start.
+    //
+    // Order of preference:
+    //   1. MICAH_GREETING_MP3_URL  (optional: pre-recorded Aussie Micah greeting)
+    //   2. <Say voice="Polly.Olivia" language="en-AU">  (AWS Neural female AU, instant)
+    //
+    // ElevenLabs Aussie Micah is still used for /process AI replies where the 1–3s
+    // synthesis time is acceptable (and there's no other way to get a custom voice).
+    const greetingMp3 = process.env.MICAH_GREETING_MP3_URL?.trim();
+    console.log("[micah/voice/incoming] greeting mode:", greetingMp3 ? "pre-recorded MP3" : "instant Say (Polly.Olivia)");
 
     const twiml = new twilio.twiml.VoiceResponse();
     const gather = twiml.gather({
@@ -149,7 +149,14 @@ export async function POST(request: NextRequest) {
       // gracefully instead of Twilio falling through and ending the call after the greeting.
       actionOnEmptyResult: true,
     });
-    applyMicahVoice(gather, greeting);
+    if (greetingMp3) {
+      gather.play({}, greetingMp3);
+    } else {
+      gather.say(
+        { voice: "Polly.Olivia", language: "en-AU" },
+        MICAH_OPENING_GREETING
+      );
+    }
     // Defensive fallback: if Twilio still falls through (gather error), redirect to /process
     // so it handles the empty-speech path with a soft re-prompt instead of hanging up.
     twiml.redirect({ method: "POST" }, processUrl);
