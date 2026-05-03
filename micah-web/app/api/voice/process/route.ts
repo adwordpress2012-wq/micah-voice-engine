@@ -103,6 +103,8 @@ async function handleProcess(request: Request) {
     );
   }
 
+  console.log("[DirectiveOS-Debug] Call from:", form.get("From"), "to:", form.get("To"));
+
   if (!isValidTwilioVoiceWebhook(request, form)) {
     console.warn("[micah/voice/process] invalid Twilio signature");
     return twimlResponse(

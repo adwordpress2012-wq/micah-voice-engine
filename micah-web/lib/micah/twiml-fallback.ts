@@ -5,14 +5,16 @@ import { escapeXml } from "@/lib/twiml";
  * Last-resort TwiML when handlers cannot build the full flow (signature failure,
  * missing OpenAI key, malformed request body, etc).
  *
- * NEVER uses Polly or any non-Aussie-Micah voice. If MICAH_FALLBACK_MP3_URL is
- * set (a pre-recorded Aussie Micah apology), it is played and the call hangs up
- * gracefully. Otherwise the call hangs up silently — better than a wrong voice.
+ * Hard rule: NEVER silent, NEVER male voice.
+ *   1. MICAH_FALLBACK_MP3_URL (pre-recorded Aussie Micah)  → <Play>
+ *   2. Otherwise              <Say voice="Polly.Olivia" language="en-AU">  ← female AU
  *
- * `userMessage` is kept in the function signature for back-compat but is not
- * spoken; the static MP3 (if configured) carries any apology audio.
+ * Polly.Olivia is the AWS Neural female Australian voice — same gender + accent
+ * as Aussie Micah, just a different TTS engine. It is hardcoded here so the
+ * error path can never be silent and can never reach a male/default voice.
  */
-export function plainErrorTwiML(_userMessage: string): string {
+export function plainErrorTwiML(userMessage: string): string {
+  const safeText = escapeXml(userMessage.slice(0, 1000));
   const mp3 = process.env.MICAH_FALLBACK_MP3_URL?.trim();
   if (mp3) {
     return `<?xml version="1.0" encoding="UTF-8"?>
@@ -21,12 +23,9 @@ export function plainErrorTwiML(_userMessage: string): string {
   <Hangup/>
 </Response>`;
   }
-  // No fallback MP3 configured — silent short pause then hang up. Caller experiences
-  // a moment of silence rather than a wrong-voice apology. Set MICAH_FALLBACK_MP3_URL
-  // (Aussie Micah pre-recorded MP3) to replace this with audible Micah audio.
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Pause length="1"/>
+  <Say voice="Polly.Olivia" language="en-AU">${safeText}</Say>
   <Hangup/>
 </Response>`;
 }

@@ -107,7 +107,7 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  console.log("Incoming Twilio:", Object.fromEntries(form.entries()));
+  console.log("[DirectiveOS-Debug] Call from:", form.get("From"), "to:", form.get("To"));
 
   const get = (k: string) => {
     const v = form.get(k);

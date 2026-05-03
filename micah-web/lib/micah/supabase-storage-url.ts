@@ -13,12 +13,17 @@ export function getStorageObjectPublicUrl(
   objectPath: string
 ): string {
   const base = process.env.SUPABASE_STORAGE_PUBLIC_URL_BASE?.trim().replace(/\/$/, "");
+  let url: string;
   if (base) {
     const segments = objectPath.split("/").filter(Boolean);
     const encodedPath = segments.map((s) => encodeURIComponent(s)).join("/");
-    return `${base}/${encodeURIComponent(bucket)}/${encodedPath}`;
+    url = `${base}/${encodeURIComponent(bucket)}/${encodedPath}`;
+  } else {
+    const { data } = supabase.storage.from(bucket).getPublicUrl(objectPath);
+    url = data.publicUrl;
   }
-
-  const { data } = supabase.storage.from(bucket).getPublicUrl(objectPath);
-  return data.publicUrl;
+  // Surface the exact URL Twilio will be told to <Play> so we can verify the
+  // bucket / project / path is correct without guessing.
+  console.log(`[micah/storage] public url (bucket="${bucket}"):`, url);
+  return url;
 }

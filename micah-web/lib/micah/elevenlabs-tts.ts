@@ -11,6 +11,16 @@ const DEFAULT_MODEL = "eleven_multilingual_v2";
  */
 export const AUSSIE_MICAH_VOICE_ID = "4Nz4vG2f9omkfcS8r4PJ";
 
+/**
+ * Hard cap on ElevenLabs synthesis time. If TTS doesn't return within this
+ * window, the caller is NOT left waiting in silence — micahVoice() falls back
+ * to <Say voice="Polly.Olivia"> immediately. Tunable via MICAH_ELEVENLABS_TIMEOUT_MS.
+ */
+const ELEVENLABS_TIMEOUT_MS = (() => {
+  const n = Number(process.env.MICAH_ELEVENLABS_TIMEOUT_MS?.trim());
+  return Number.isFinite(n) && n > 0 ? n : 1500;
+})();
+
 /** Drain Web `ReadableStream` bytes without relying on `Response(stream)` (Node/Web compatible). */
 async function readableStreamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
   const reader = stream.getReader();
@@ -72,15 +82,30 @@ export async function elevenLabsTtsPublicMp3Url(
   let buf: Buffer;
   try {
     const client = new ElevenLabsClient({ apiKey });
-    const stream = await client.textToSpeech.convert(voiceId, {
-      text: plain,
-      modelId,
-      outputFormat: "mp3_44100_128",
-    });
-    buf = await readableStreamToBuffer(stream);
+    // Hard timeout: if ElevenLabs doesn't return audio within ELEVENLABS_TIMEOUT_MS
+    // (default 1500ms), abort and let the caller fall back to Polly.Olivia.
+    // The user must hear a voice quickly — silence is the worse failure mode.
+    const synthAndDrain = (async () => {
+      const stream = await client.textToSpeech.convert(voiceId, {
+        text: plain,
+        modelId,
+        outputFormat: "mp3_44100_128",
+      });
+      return readableStreamToBuffer(stream);
+    })();
+
+    buf = await Promise.race([
+      synthAndDrain,
+      new Promise<Buffer>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`ElevenLabs timeout after ${ELEVENLABS_TIMEOUT_MS}ms`)),
+          ELEVENLABS_TIMEOUT_MS
+        )
+      ),
+    ]);
   } catch (e) {
     const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-    console.error(`[micah/elevenlabs] TTS API failed (voiceId=${voiceId}, model=${modelId}):`, msg);
+    console.error(`[micah/elevenlabs] TTS API failed (voiceId=${voiceId}, model=${modelId}, timeout=${ELEVENLABS_TIMEOUT_MS}ms):`, msg);
     return null;
   }
 

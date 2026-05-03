@@ -65,6 +65,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    console.log("[DirectiveOS-Debug] Call from:", form.get("From"), "to:", form.get("To"));
+
     if (!isValidTwilioVoiceWebhook(request, form)) {
       console.warn("[micah/voice/incoming] invalid Twilio signature");
       return twimlResponse(
