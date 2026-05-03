@@ -12,6 +12,7 @@ import {
   MICAH_SAY_LANGUAGE,
   micahSayAttributes,
 } from "@/lib/micah/twilio-voice";
+import { elevenLabsTtsPublicMp3Url } from "@/lib/micah/elevenlabs-tts";
 import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
@@ -31,9 +32,17 @@ function formString(form: FormData, key: string): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-function continuationTwiML(aiReply: string, processUrl: string): string {
+function continuationTwiML(
+  aiReply: string,
+  processUrl: string,
+  audioUrl: string | null
+): string {
   const vr = new twilio.twiml.VoiceResponse();
-  vr.say(micahSayAttributes(), aiReply);
+  if (audioUrl) {
+    vr.play(audioUrl);
+  } else {
+    vr.say(micahSayAttributes(), aiReply);
+  }
   const gather = vr.gather({
     input: ["speech"],
     timeout: 15,
@@ -224,8 +233,18 @@ async function handleProcess(request: Request) {
     }
   }
 
+  // Synthesize Aussie Micah via ElevenLabs → upload to Supabase → <Play> the public MP3 URL.
+  // On any failure (missing keys, upload error, API error) returns null and we fall back to Polly.Olivia <Say>.
+  let audioUrl: string | null = null;
   try {
-    const twiml = continuationTwiML(aiReply, processUrl);
+    audioUrl = await elevenLabsTtsPublicMp3Url(supabase, aiReply, callSid || `nosid-${Date.now()}`);
+    console.log("[micah/voice/process] tts result:", { audioUrl: audioUrl ? "ok" : "null (Polly fallback)" });
+  } catch (e) {
+    console.error("[micah/voice/process] elevenlabs (non-fatal, falling back to Polly):", e);
+  }
+
+  try {
+    const twiml = continuationTwiML(aiReply, processUrl, audioUrl);
     return twimlResponse(twiml, "[micah/voice/process] ok");
   } catch (e) {
     console.error("[micah/voice/process] twiml:", e);

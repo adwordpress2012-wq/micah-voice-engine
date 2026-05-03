@@ -3,6 +3,8 @@ import type { NextRequest } from "next/server";
 import { plainErrorTwiML, twimlResponse } from "@/lib/micah/twiml-fallback";
 import { MICAH_SAY_LANGUAGE, micahSayAttributes } from "@/lib/micah/twilio-voice";
 import { MICAH_OPENING_GREETING } from "@/lib/micah/micah-voice-persona";
+import { elevenLabsTtsPublicMp3Url } from "@/lib/micah/elevenlabs-tts";
+import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { safeBuildPublicBaseUrl } from "@/lib/micah-prompt";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
 
@@ -124,6 +126,21 @@ export async function POST(request: NextRequest) {
     const processUrl = `${base}/api/voice/process?mode=${isDemo ? "demo" : "main"}`;
     console.log("[micah/debug] persona mode:", { to: toNumber || "(none)", isDemo });
 
+    // Pre-synthesize the greeting via ElevenLabs (Aussie Micah). Falls back to Polly.Olivia <Say> if anything goes wrong.
+    const callSid = formString(form, "CallSid") || `nosid-${Date.now()}`;
+    let greetingAudioUrl: string | null = null;
+    try {
+      const supabase = getServiceSupabaseOrNull();
+      greetingAudioUrl = await elevenLabsTtsPublicMp3Url(
+        supabase,
+        MICAH_OPENING_GREETING,
+        `greeting-${callSid}`
+      );
+      console.log("[micah/voice/incoming] greeting tts:", { audioUrl: greetingAudioUrl ? "ok" : "null (Polly fallback)" });
+    } catch (e) {
+      console.error("[micah/voice/incoming] elevenlabs greeting (non-fatal, falling back to Polly):", e);
+    }
+
     const twiml = new twilio.twiml.VoiceResponse();
     const gather = twiml.gather({
       input: ["speech"],
@@ -136,7 +153,11 @@ export async function POST(request: NextRequest) {
       // gracefully instead of Twilio falling through and ending the call after the greeting.
       actionOnEmptyResult: true,
     });
-    gather.say(micahSayAttributes(), MICAH_OPENING_GREETING);
+    if (greetingAudioUrl) {
+      gather.play({}, greetingAudioUrl);
+    } else {
+      gather.say(micahSayAttributes(), MICAH_OPENING_GREETING);
+    }
     // Defensive fallback: if Twilio still falls through (gather error), redirect to /process
     // so it handles the empty-speech path with a soft re-prompt instead of hanging up.
     twiml.redirect({ method: "POST" }, processUrl);
