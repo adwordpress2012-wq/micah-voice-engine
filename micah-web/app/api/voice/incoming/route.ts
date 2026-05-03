@@ -9,6 +9,7 @@ type TwilioVR = import("twilio/lib/twiml/VoiceResponse");
 
 const VOICE_ENGINE = process.env.MICAH_VOICE_ENGINE?.trim().toLowerCase() ?? "";
 const STREAM_WSS = process.env.MICAH_MEDIA_STREAM_WSS_URL?.trim() ?? "";
+/** Must match `micah-realtime-bridge` env `MICAH_BRIDGE_SECRET` (appended as `?token=` when URL has no token). */
 const BRIDGE_TOKEN = process.env.MICAH_BRIDGE_SECRET?.trim() ?? "";
 
 /** Opening gather — enough time to speak after the greeting. */
