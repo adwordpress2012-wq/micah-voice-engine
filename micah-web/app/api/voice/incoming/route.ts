@@ -1,11 +1,10 @@
 import twilio from "twilio";
 import type { NextRequest } from "next/server";
 import { plainErrorTwiMLResponse, twimlResponse } from "@/lib/micah/twiml-fallback";
-import {
-  MICAH_SAY_LANGUAGE,
-  gatherPlayOrPollyOliviaSay,
-  playOrPollyOliviaSay,
-} from "@/lib/micah/twilio-voice";
+import { MICAH_SAY_LANGUAGE, playOrPollyOliviaSay } from "@/lib/micah/twilio-voice";
+import { defaultElevenLabsTtsTimeoutMs } from "@/lib/micah/elevenlabs-tts";
+import { applyMicahVoice, micahVoice } from "@/lib/micah/voice-output";
+import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import {
   micahGatherOpeningSay,
   micahGatherTimeoutSay,
@@ -13,14 +12,7 @@ import {
 } from "@/lib/micah/voice-greetings";
 import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
-import {
-  canUseElevenLabsTts,
-  defaultElevenLabsTtsTimeoutMs,
-  elevenLabsTtsPublicMp3UrlWithTimeout,
-  micahTtsBlockedReasons,
-  AUSSIE_MICAH_VOICE_ID,
-} from "@/lib/micah/elevenlabs-tts";
-import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
+import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/micah/elevenlabs-tts";
 
 type TwilioVR = import("twilio/lib/twiml/VoiceResponse");
 
@@ -35,7 +27,11 @@ function formString(form: FormData, key: string): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-/** Two EL synths + cold start can exceed 30s — Twilio needs 200 + TwiML before timeout. */
+/**
+ * First spoken line uses {@link micahVoice} + {@link applyMicahVoice} (ElevenLabs Aussie Micah,
+ * or `MICAH_GREETING_MP3_URL` / Polly.Olivia). When no static greeting URL is set, EL runs under
+ * {@link defaultElevenLabsTtsTimeoutMs} so the webhook stays within typical serverless limits.
+ */
 export const maxDuration = 60;
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -46,7 +42,7 @@ export async function GET() {
       ? "realtime media stream"
       : "gather → /api/voice/process";
   return new Response(
-    `POST /api/voice/incoming — Micah (${mode}). ElevenLabs <Play> + Polly.Olivia fallback.`,
+    `POST /api/voice/incoming — Micah (${mode}). Opening line via micahVoice (EL or MICAH_GREETING_MP3_URL); follow-up on /api/voice/process.`,
     {
       status: 200,
       headers: { "Content-Type": "text/plain; charset=utf-8" },
@@ -55,6 +51,9 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const gatherContinuationUrl = `${resolveVoiceActionBaseUrl(request)}/api/voice/process`;
+  const gatherOpts = { gatherContinuationUrl };
+
   try {
     let form: FormData;
     try {
@@ -63,7 +62,8 @@ export async function POST(request: NextRequest) {
       return plainErrorTwiMLResponse(
         "",
         "Hi, it's Micah — I couldn't read that request properly. Please try calling again.",
-        "[micah/voice/incoming] bad-form"
+        "[micah/voice/incoming] bad-form",
+        gatherOpts
       );
     }
 
@@ -81,23 +81,24 @@ export async function POST(request: NextRequest) {
       return plainErrorTwiMLResponse(
         callSid,
         "Hi — I'm having trouble verifying this call. Please hang up and dial again.",
-        "[micah/voice/incoming] bad-signature"
+        "[micah/voice/incoming] bad-signature",
+        gatherOpts
       );
     }
 
     const useRealtime =
       VOICE_ENGINE === "realtime" || VOICE_ENGINE === "openai-realtime";
 
-    const supabase = getServiceSupabaseOrNull();
     const sid = callSid || `anon-${Date.now()}`;
-    const budget = defaultElevenLabsTtsTimeoutMs();
+    const supabase = getServiceSupabaseOrNull();
 
     if (useRealtime) {
       if (!STREAM_WSS) {
         return plainErrorTwiMLResponse(
           callSid,
           "Micah's realtime voice link isn't configured yet — please try again later.",
-          "[micah/voice/incoming] missing-stream-url"
+          "[micah/voice/incoming] missing-stream-url",
+          gatherOpts
         );
       }
       let streamUrl = STREAM_WSS;
@@ -109,23 +110,18 @@ export async function POST(request: NextRequest) {
       const to = formString(form, "To");
 
       const preconnect = micahRealtimePreconnectSay();
-      console.log(
-        "[micah/voice/incoming] realtime TwiML — preconnect ElevenLabs, length=",
-        preconnect.length
-      );
+      const staticPre = process.env.MICAH_GREETING_MP3_URL?.trim() || null;
 
       const vr = new twilio.twiml.VoiceResponse();
-      const staticPre = process.env.MICAH_GREETING_MP3_URL?.trim() || null;
-      let preUrl: string | null = staticPre;
-      if (!preUrl && canUseElevenLabsTts(supabase)) {
-        preUrl = await elevenLabsTtsPublicMp3UrlWithTimeout(
-          supabase,
-          preconnect,
-          sid,
-          budget
-        );
-      }
-      playOrPollyOliviaSay(vr, preUrl, preconnect);
+      const preResult = await micahVoice({
+        text: preconnect,
+        callSid: sid,
+        supabase,
+        label: "incoming-realtime-preconnect",
+        preferredPlayUrl: staticPre,
+        ttsBudgetMs: staticPre ? undefined : defaultElevenLabsTtsTimeoutMs(),
+      });
+      applyMicahVoice(vr, preResult);
 
       const connect = vr.connect();
       const stream = connect.stream({
@@ -134,6 +130,11 @@ export async function POST(request: NextRequest) {
       });
       stream.parameter({ name: "From", value: from });
       stream.parameter({ name: "To", value: to });
+
+      console.log(
+        "[micah/voice/incoming] realtime TwiML — micahVoice preconnect + <Connect><Stream>, EL voiceId=",
+        MICAH_ELEVENLABS_VOICE_ID
+      );
 
       return new Response(vr.toString(), {
         status: 200,
@@ -147,41 +148,9 @@ export async function POST(request: NextRequest) {
 
     const opening = micahGatherOpeningSay();
     const timeoutLine = micahGatherTimeoutSay();
-    const elOk = canUseElevenLabsTts(supabase);
-    if (!elOk) {
-      console.error("[micah/voice/incoming] ElevenLabs `<Play>` blocked:", micahTtsBlockedReasons());
-    } else {
-      console.log("[micah/voice/incoming] EL ok voiceId=", AUSSIE_MICAH_VOICE_ID);
-    }
-
-    console.log(
-      "[micah/voice/incoming] gather — opening length=",
-      opening.length,
-      "timeoutLine length=",
-      timeoutLine.length
-    );
+    const staticGreetingMp3 = process.env.MICAH_GREETING_MP3_URL?.trim() || null;
 
     const twiml = new twilio.twiml.VoiceResponse();
-
-    const staticGreetingMp3 = process.env.MICAH_GREETING_MP3_URL?.trim() || null;
-    let openingAudioUrl: string | null = staticGreetingMp3;
-    let timeoutUrl: string | null = null;
-    if (elOk && supabase) {
-      const timeoutPromise = elevenLabsTtsPublicMp3UrlWithTimeout(
-        supabase,
-        timeoutLine,
-        sid,
-        budget
-      );
-      if (!openingAudioUrl) {
-        [openingAudioUrl, timeoutUrl] = await Promise.all([
-          elevenLabsTtsPublicMp3UrlWithTimeout(supabase, opening, sid, budget),
-          timeoutPromise,
-        ]);
-      } else {
-        timeoutUrl = await timeoutPromise;
-      }
-    }
 
     const gather = twiml.gather({
       input: ["speech"],
@@ -191,21 +160,40 @@ export async function POST(request: NextRequest) {
       method: "POST",
       language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
     });
-    gatherPlayOrPollyOliviaSay(gather, openingAudioUrl, opening);
+    const openingResult = await micahVoice({
+      text: opening,
+      callSid: sid,
+      supabase,
+      label: "incoming-gather-opening",
+      preferredPlayUrl: staticGreetingMp3,
+      ttsBudgetMs: staticGreetingMp3 ? undefined : defaultElevenLabsTtsTimeoutMs(),
+    });
+    applyMicahVoice(gather, openingResult);
 
-    playOrPollyOliviaSay(twiml, timeoutUrl, timeoutLine);
+    playOrPollyOliviaSay(twiml, null, timeoutLine);
     twiml.hangup();
 
-    return new Response(twiml.toString(), {
-      status: 200,
-      headers: { "Content-Type": "text/xml; charset=utf-8" },
-    });
+    console.log(
+      "[micah/voice/incoming] <Gather> opening via micahVoice; Aussie Micah EL on /api/voice/process, voiceId=",
+      MICAH_ELEVENLABS_VOICE_ID
+    );
+
+    return twimlResponse(twiml.toString(), "[micah/voice/incoming] gather-ok");
   } catch (e) {
     console.error("[micah/voice/incoming] fatal:", e);
+    let fatalGather: { gatherContinuationUrl?: string } | undefined;
+    try {
+      fatalGather = {
+        gatherContinuationUrl: `${resolveVoiceActionBaseUrl(request)}/api/voice/process`,
+      };
+    } catch {
+      /* no NEXT_PUBLIC_APP_URL — omit gather */
+    }
     return plainErrorTwiMLResponse(
       "",
       "Hi, it's Micah — I'm having a quick connection hiccup. Please try your call again in a moment.",
-      "[micah/voice/incoming] fatal"
+      "[micah/voice/incoming] fatal",
+      fatalGather
     );
   }
 }

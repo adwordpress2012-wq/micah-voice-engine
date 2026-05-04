@@ -7,6 +7,7 @@ import {
   defaultElevenLabsTtsTimeoutMs,
   elevenLabsTtsPublicMp3UrlWithTimeout,
 } from "@/lib/micah/elevenlabs-tts";
+import { micahElevenLabsOptsForUtterance } from "@/lib/micah/micah-empathy-tts";
 import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import {
@@ -56,21 +57,31 @@ async function buildOpeningTwiml(
   let listenUrl: string | null = null;
   let timeoutUrl: string | null = null;
   if (canUseElevenLabsTts(supabase) && supabase) {
+    const listenLine = "I'm listening.";
+    const timeoutLine = "I'll hang up — feel free to call back anytime.";
     const listenP = elevenLabsTtsPublicMp3UrlWithTimeout(
       supabase,
-      "I'm listening.",
+      listenLine,
       sid,
-      budget
+      budget,
+      micahElevenLabsOptsForUtterance(listenLine)
     );
     const timeoutP = elevenLabsTtsPublicMp3UrlWithTimeout(
       supabase,
-      "I'll hang up — feel free to call back anytime.",
+      timeoutLine,
       sid,
-      budget
+      budget,
+      micahElevenLabsOptsForUtterance(timeoutLine)
     );
     if (!greetUrl) {
       [greetUrl, listenUrl, timeoutUrl] = await Promise.all([
-        elevenLabsTtsPublicMp3UrlWithTimeout(supabase, greeting, sid, budget),
+        elevenLabsTtsPublicMp3UrlWithTimeout(
+          supabase,
+          greeting,
+          sid,
+          budget,
+          micahElevenLabsOptsForUtterance(greeting)
+        ),
         listenP,
         timeoutP,
       ]);
@@ -123,19 +134,22 @@ async function buildConversationTwiml(
             supabase,
             assistantLine,
             sid,
-            budget
+            budget,
+            micahElevenLabsOptsForUtterance(assistantLine)
           ),
       elevenLabsTtsPublicMp3UrlWithTimeout(
         supabase,
         "Anything else I can help with?",
         sid,
-        budget
+        budget,
+        micahElevenLabsOptsForUtterance("Anything else I can help with?")
       ),
       elevenLabsTtsPublicMp3UrlWithTimeout(
         supabase,
         "Thanks for calling — goodbye for now.",
         sid,
-        budget
+        budget,
+        micahElevenLabsOptsForUtterance("Thanks for calling — goodbye for now.")
       ),
     ]);
     mainUrl = rest[0];
@@ -172,12 +186,17 @@ export async function GET() {
 }
 
 export async function POST(req: Request): Promise<Response> {
+  const base = resolveVoiceActionBaseUrl(req);
+  const gatherActionUrl = `${base}/api/process`;
+  const gatherOpts = { gatherContinuationUrl: gatherActionUrl };
+
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
     return plainErrorTwiMLResponse(
       "",
       "Micah isn't configured yet — please try again later.",
-      "[micah/process] no-openai"
+      "[micah/process] no-openai",
+      gatherOpts
     );
   }
 
@@ -188,7 +207,8 @@ export async function POST(req: Request): Promise<Response> {
     return plainErrorTwiMLResponse(
       "",
       "Invalid request.",
-      "[micah/process] bad-form"
+      "[micah/process] bad-form",
+      gatherOpts
     );
   }
 
@@ -198,7 +218,11 @@ export async function POST(req: Request): Promise<Response> {
     "To:",
     form.get("To")
   );
-  console.log("Incoming Twilio:", Object.fromEntries(form.entries()));
+  console.log("[micah/process] Twilio webhook meta", {
+    CallSid: form.get("CallSid"),
+    From: form.get("From"),
+    To: form.get("To"),
+  });
 
   const get = (k: string) => {
     const v = form.get(k);
@@ -218,10 +242,11 @@ export async function POST(req: Request): Promise<Response> {
   const client = dbClient ?? fallbackClient();
   const matchedFromDb = dbClient != null;
 
-  console.log("Matched client:", matchedFromDb ? dbClient : client);
+  console.log("[micah/process] matched client", {
+    matchedFromDb,
+    agency_name: client.agency_name,
+  });
 
-  const base = resolveVoiceActionBaseUrl(req);
-  const gatherActionUrl = `${base}/api/process`;
   console.log("[Micah-Audit] Gather action URL:", gatherActionUrl);
 
   const greeting = `G'day! You've reached ${client.agency_name}, I'm Micah. How can I help you today?`;
@@ -302,7 +327,8 @@ export async function POST(req: Request): Promise<Response> {
       supabase,
       assistantText,
       callSid || `anon-${Date.now()}`,
-      defaultElevenLabsTtsTimeoutMs()
+      defaultElevenLabsTtsTimeoutMs(),
+      micahElevenLabsOptsForUtterance(assistantText)
     );
   }
 

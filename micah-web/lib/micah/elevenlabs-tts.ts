@@ -1,15 +1,25 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { convertTextToSpeech, AUSSIE_MICAH_VOICE_ID } from "@/lib/elevenlabs-tts";
+import {
+  convertTextToSpeech,
+  MICAH_ELEVENLABS_VOICE_ID,
+  type ElevenLabsVoiceSettings,
+} from "@/lib/elevenlabs-tts";
 import {
   getCanonicalSupabasePublicObjectUrl,
   getStorageObjectPublicUrl,
 } from "@/lib/micah/supabase-storage-url";
 
-/** @deprecated Use {@link AUSSIE_MICAH_VOICE_ID} from `@/lib/elevenlabs-tts`. */
-export const MICAH_ELEVENLABS_VOICE_ID_DEFAULT = AUSSIE_MICAH_VOICE_ID;
+/** Re-export — voice id is fixed in source; never from env. */
+export {
+  MICAH_ELEVENLABS_VOICE_ID,
+  convertTextToSpeech,
+  type ElevenLabsVoiceSettings,
+} from "@/lib/elevenlabs-tts";
 
-/** Re-export — voice id is fixed; never from env. */
-export { AUSSIE_MICAH_VOICE_ID, convertTextToSpeech } from "@/lib/elevenlabs-tts";
+/** Optional synthesis overrides for {@link elevenLabsTtsPublicMp3Url} / {@link elevenLabsTtsPublicMp3UrlWithTimeout}. */
+export type ElevenLabsTtsPublicOpts = {
+  voiceSettings?: Partial<ElevenLabsVoiceSettings>;
+};
 
 /**
  * Default bucket name (`micah-tts`) — public URLs follow
@@ -75,14 +85,20 @@ export async function elevenLabsTtsPublicMp3UrlWithTimeout(
   supabase: SupabaseClient | null,
   text: string,
   callSid: string,
-  timeoutMs: number
+  timeoutMs: number,
+  opts?: ElevenLabsTtsPublicOpts
 ): Promise<string | null> {
   return new Promise((resolve) => {
     const t = setTimeout(() => {
-      console.warn(`[micah/elevenlabs] TTS timed out after ${timeoutMs}ms`);
+      console.warn(`[micah/elevenlabs] TTS timed out after ${timeoutMs}ms`, {
+        micahVoiceQA: true,
+        event: "elevenlabs_tts_timeout",
+        elevenLabsVoiceId: MICAH_ELEVENLABS_VOICE_ID,
+        nextVoice: "Polly.Olivia en-AU or caller script Say",
+      });
       resolve(null);
     }, timeoutMs);
-    void elevenLabsTtsPublicMp3Url(supabase, text, callSid).then(
+    void elevenLabsTtsPublicMp3Url(supabase, text, callSid, opts).then(
       (url) => {
         clearTimeout(t);
         resolve(url);
@@ -138,12 +154,13 @@ async function warnIfPlayUrlReadableByTwilio(publicUrl: string): Promise<void> {
 
 /**
  * ElevenLabs TTS → MP3 upload via **service-role** Supabase client (`SUPABASE_SERVICE_ROLE_KEY`).
- * Uses {@link convertTextToSpeech} (`AUSSIE_MICAH_VOICE_ID` only).
+ * Uses {@link convertTextToSpeech} with hardcoded {@link MICAH_ELEVENLABS_VOICE_ID} only.
  */
 export async function elevenLabsTtsPublicMp3Url(
   supabase: SupabaseClient | null,
   text: string,
-  callSid: string
+  callSid: string,
+  opts?: ElevenLabsTtsPublicOpts
 ): Promise<string | null> {
   if (!process.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) {
     console.warn("[micah/elevenlabs] SUPABASE_SERVICE_ROLE_KEY missing — cannot upload to Storage");
@@ -168,7 +185,7 @@ export async function elevenLabsTtsPublicMp3Url(
   const modelId = process.env.ELEVENLABS_MODEL_ID?.trim() ?? DEFAULT_MODEL;
 
   try {
-    const buf = await convertTextToSpeech(plain);
+    const buf = await convertTextToSpeech(plain, opts?.voiceSettings);
     if (!buf.length) {
       console.warn("[micah/elevenlabs] empty audio buffer");
       return null;
@@ -187,8 +204,10 @@ export async function elevenLabsTtsPublicMp3Url(
     }
 
     const publicUrl = micahTtsStoragePublicUrl(supabase, bucket, path);
-    console.log("[micah/elevenlabs] synthesised Aussie Micah", {
-      voiceId: AUSSIE_MICAH_VOICE_ID,
+    console.log("[micah/elevenlabs] synthesised Micah ElevenLabs MP3", {
+      micahVoiceQA: true,
+      event: "elevenlabs_uploaded_play_url",
+      voiceId: MICAH_ELEVENLABS_VOICE_ID,
       modelId,
       bytes: buf.length,
       path,
@@ -199,6 +218,9 @@ export async function elevenLabsTtsPublicMp3Url(
   } catch (e) {
     const err = e as Error & { cause?: unknown; statusCode?: number };
     console.error("[micah/elevenlabs] TTS pipeline failed:", {
+      micahVoiceQA: true,
+      event: "elevenlabs_pipeline_failed",
+      voiceId: MICAH_ELEVENLABS_VOICE_ID,
       message: err?.message ?? String(e),
       name: err?.name,
       statusCode: err?.statusCode,

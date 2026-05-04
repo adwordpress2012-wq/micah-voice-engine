@@ -12,7 +12,11 @@ function safeTrim(s: string | undefined): string {
   return t.length > 0 ? t.slice(0, MAX_SAY_CHARS) : "";
 }
 
-/** Gather opening inside `<Gather>` — matches Micah mandatory greeting (MICAH_GATHER_GREETING overrides). */
+/**
+ * Gather opening inside `<Gather>` — canonical Micah greeting when `MICAH_AGENCY_NAME` is **Directive OS** (default):
+ * "G'day! You've reached Directive OS, I'm Micah. How can I help you today?"
+ * Override entirely with `MICAH_GATHER_GREETING` if needed.
+ */
 export function micahGatherOpeningSay(): string {
   const custom = safeTrim(process.env.MICAH_GATHER_GREETING);
   if (custom) return custom;
