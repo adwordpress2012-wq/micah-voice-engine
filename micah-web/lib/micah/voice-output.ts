@@ -4,14 +4,14 @@
  *
  * BRAND-STRICT POLICY:
  *   "All spoken output must originate from ElevenLabs Aussie Micah voice
- *    (id=4Nz4vG2f9omkfcS8r4PJ) or pre-recorded static MP3 audio approved by
+ *    (id=`MICAH_ELEVENLABS_VOICE_ID` from `lib/elevenlabs-tts.ts`) or pre-recorded static MP3 audio approved by
  *    Directive OS. Polly/Olivia, default Twilio system voices, or any other
  *    fallback are forbidden. Fallback to silence is acceptable only when all
  *    assets are unavailable. No other TTS system shall be present in this
  *    pipeline."
  *
  * Fallback chain (in order):
- *   1. ElevenLabs Aussie Micah MP3 (voice ID 4Nz4vG2f9omkfcS8r4PJ)
+ *   1. ElevenLabs Aussie Micah MP3 (voice ID `MICAH_ELEVENLABS_VOICE_ID` — see `lib/elevenlabs-tts.ts`)
  *   2. Pre-recorded Aussie Micah MP3 at MICAH_FALLBACK_MP3_URL
  *   3. Silent <Pause> — logged loudly. Acceptable only when both (1) and (2)
  *      are unavailable. NEVER falls back to Polly or any other TTS engine.

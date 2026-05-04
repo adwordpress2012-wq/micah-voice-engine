@@ -1,3 +1,4 @@
+import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
 import { buildVoiceEnvDiagnostics } from "@/lib/micah/voice-env-diagnostics";
 import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
@@ -36,8 +37,7 @@ export async function GET(request: Request) {
   return Response.json({
     voicePipeline:
       "ElevenLabs Aussie Micah MP3 → Supabase Storage → Twilio <Play>; if synth fails → MICAH_FALLBACK_MP3_URL <Play>; if that's missing → silent <Pause> (brand policy: Polly forbidden).",
-    brandPolicy:
-      "All spoken output must originate from ElevenLabs Aussie Micah voice (id=4Nz4vG2f9omkfcS8r4PJ) or pre-recorded static MP3 audio approved by Directive OS. Polly/Olivia, default Twilio system voices, or any other fallback are forbidden. Fallback to silence is acceptable only when all assets are unavailable.",
+    brandPolicy: `All spoken output must originate from ElevenLabs Aussie Micah voice (id=${MICAH_ELEVENLABS_VOICE_ID}) or pre-recorded static MP3 audio approved by Directive OS. Polly/Olivia, default Twilio system voices, or any other fallback are forbidden. Fallback to silence is acceptable only when all assets are unavailable.`,
     overallStatus: checks.overallStatus,
     supabaseClientCreated: !!supabase,
     defaultVoiceId: checks.micahElevenLabsVoiceId,

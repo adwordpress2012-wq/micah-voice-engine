@@ -2,7 +2,7 @@
  * Twilio Voice helpers — BRAND-STRICT POLICY:
  *
  *   "All spoken output must originate from ElevenLabs Aussie Micah voice
- *    (id=4Nz4vG2f9omkfcS8r4PJ) or pre-recorded static MP3 audio approved by
+ *    (id=`MICAH_ELEVENLABS_VOICE_ID` from `lib/elevenlabs-tts.ts`) or pre-recorded static MP3 audio approved by
  *    Directive OS. Polly/Olivia, default Twilio system voices, or any other
  *    fallback are forbidden. Fallback to silence is acceptable only when all
  *    assets are unavailable. No other TTS system shall be present in this

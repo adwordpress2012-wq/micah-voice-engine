@@ -40,14 +40,18 @@ The voice resolution chain across every Twilio route:
 
 Generate `micah-fallback.mp3` once with the official voice and upload to your Supabase `micah-tts` bucket (public-read). Then set `MICAH_FALLBACK_MP3_URL` to the public URL.
 
+The voice ID is **never** literalised in scripts — always import the canonical constant from `lib/elevenlabs-tts.ts` so brand compliance is structurally enforced. Run the script from the `micah-web/` directory with `npx tsx`:
+
 ```ts
+// micah-web/scripts/generate-fallback-mp3.ts
 import fs from 'node:fs';
 import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
+import { MICAH_ELEVENLABS_VOICE_ID } from '../lib/elevenlabs-tts';
 
 async function main() {
   const client = new ElevenLabsClient({ apiKey: process.env.ELEVENLABS_API_KEY });
   const audio = await client.textToSpeech.convert(
-    '4Nz4vG2f9omkfcS8r4PJ',
+    MICAH_ELEVENLABS_VOICE_ID,
     { text: "Sorry, I'm having trouble right now. Please try again later." }
   );
   fs.writeFileSync('micah-fallback.mp3', Buffer.from(audio));
