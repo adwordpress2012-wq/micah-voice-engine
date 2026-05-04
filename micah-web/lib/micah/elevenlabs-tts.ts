@@ -45,7 +45,8 @@ const DEFAULT_MODEL = "eleven_multilingual_v2";
 
 /**
  * Wall-clock budget for ElevenLabs + Supabase upload per attempt.
- * Default **1500ms** — then callers fall back to Polly.Olivia so calls are not silent.
+ * Default **1500ms** — then callers fall back to MICAH_FALLBACK_MP3_URL (or
+ * silent <Pause> if unset). Brand policy forbids Polly fallback.
  * Override with `ELEVENLABS_TTS_TIMEOUT_MS` for slower networks (e.g. `8000`).
  */
 export function defaultElevenLabsTtsTimeoutMs(): number {
@@ -79,7 +80,8 @@ export function micahTtsBlockedReasons(): string[] {
 
 /**
  * Same as {@link elevenLabsTtsPublicMp3Url} but aborts after `timeoutMs` so Twilio never waits past serverless limits.
- * Returns `null` on timeout — caller should use Polly.Olivia `<Say>` (see `twilio-voice.ts`).
+ * Returns `null` on timeout — caller should fall back to `MICAH_FALLBACK_MP3_URL <Play>` or silent `<Pause>`
+ * (see `voice-output.ts` / `twilio-voice.ts`). Brand policy forbids Polly fallback.
  */
 export async function elevenLabsTtsPublicMp3UrlWithTimeout(
   supabase: SupabaseClient | null,
@@ -94,7 +96,7 @@ export async function elevenLabsTtsPublicMp3UrlWithTimeout(
         micahVoiceQA: true,
         event: "elevenlabs_tts_timeout",
         elevenLabsVoiceId: MICAH_ELEVENLABS_VOICE_ID,
-        nextVoice: "Polly.Olivia en-AU or caller script Say",
+        nextVoice: "MICAH_FALLBACK_MP3_URL <Play> if set, else silent <Pause> (brand policy: no Polly)",
       });
       resolve(null);
     }, timeoutMs);

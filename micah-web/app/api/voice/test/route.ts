@@ -7,14 +7,14 @@ import {
 } from "@/lib/micah/elevenlabs-tts";
 import { micahElevenLabsOptsForUtterance } from "@/lib/micah/micah-empathy-tts";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
-import { playOrPollyOliviaSay } from "@/lib/micah/twilio-voice";
+import { playOrFallbackMp3 } from "@/lib/micah/twilio-voice";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   return new Response(
-    "POST /api/voice/test — ElevenLabs Aussie Micah only (no bare Say).",
+    "POST /api/voice/test — ElevenLabs Aussie Micah <Play>; MICAH_FALLBACK_MP3_URL on synth failure; silent <Pause> if both unavailable (brand policy: no Polly).",
     {
       status: 200,
       headers: { "Content-Type": "text/plain; charset=utf-8" },
@@ -48,16 +48,18 @@ export async function POST() {
       mp3Url: url,
     });
   } else {
-    console.warn("[micah/voice/test] ElevenLabs unavailable — Polly.Olivia Say only.", {
-      micahVoiceQA: true,
-      event: "voice_test_polly_fallback",
-      elevenLabsVoiceIdAttempted: voiceId,
-      pollyVoice: "Polly.Olivia",
-      pollyLanguage: "en-AU",
-      blocked: micahTtsBlockedReasons(),
-    });
+    console.warn(
+      "[micah/voice/test] ElevenLabs unavailable — falling back to MICAH_FALLBACK_MP3_URL or silent <Pause> (brand policy: no Polly).",
+      {
+        micahVoiceQA: true,
+        event: "voice_test_static_fallback",
+        elevenLabsVoiceIdAttempted: voiceId,
+        fallbackMp3Configured: !!process.env.MICAH_FALLBACK_MP3_URL?.trim(),
+        blocked: micahTtsBlockedReasons(),
+      }
+    );
   }
-  playOrPollyOliviaSay(vr, url, fallbackSay);
+  playOrFallbackMp3(vr, url, fallbackSay);
 
   return new Response(vr.toString(), {
     status: 200,

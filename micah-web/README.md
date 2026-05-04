@@ -22,6 +22,42 @@ curl -sI "https://YOUR_DOMAIN/api/voice/incoming"
 
 You should see **HTTP/2 200** (or 200) on the **same host** Twilio uses. If you get **401**, webhooks from Twilio will not work on that host.
 
+## Brand-strict voice policy
+
+> All spoken output must originate from ElevenLabs Aussie Micah voice
+> (id=`4Nz4vG2f9omkfcS8r4PJ`) or pre-recorded static MP3 audio approved by
+> Directive OS. Polly/Olivia, default Twilio system voices, or any other
+> fallback are forbidden. Fallback to silence is acceptable only when all
+> assets are unavailable. No other TTS system shall be present in this pipeline.
+
+The voice resolution chain across every Twilio route:
+
+1. **ElevenLabs Aussie Micah** — `<Play>` MP3 synthesised on demand and uploaded to the `SUPABASE_TTS_BUCKET` public bucket.
+2. **`MICAH_FALLBACK_MP3_URL`** — `<Play>` of a pre-recorded Aussie Micah apology MP3 (e.g. *"Sorry, I'm having trouble right now. Please try again later."*) hosted at a public URL.
+3. **`<Pause length="1"/>`** — silent. Reached only when both (1) and (2) are unavailable. Logged loudly via `[micah/voice] … SILENT`. Brand policy forbids Polly here.
+
+### Aussie Micah fallback asset (one-time generation)
+
+Generate `micah-fallback.mp3` once with the official voice and upload to your Supabase `micah-tts` bucket (public-read). Then set `MICAH_FALLBACK_MP3_URL` to the public URL.
+
+```ts
+import fs from 'node:fs';
+import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
+
+async function main() {
+  const client = new ElevenLabsClient({ apiKey: process.env.ELEVENLABS_API_KEY });
+  const audio = await client.textToSpeech.convert(
+    '4Nz4vG2f9omkfcS8r4PJ',
+    { text: "Sorry, I'm having trouble right now. Please try again later." }
+  );
+  fs.writeFileSync('micah-fallback.mp3', Buffer.from(audio));
+  console.log('Saved micah-fallback.mp3');
+}
+main();
+```
+
+Same recipe for `micah-greeting.mp3` (text = `"G'day! You've reached Directive OS, I'm Micah. How can I help you today?"`) → set `MICAH_GREETING_MP3_URL` for instant pickup audio.
+
 ## Voice diagnostics & security
 
 ### Masked keys (Fly / Vercel logs)
@@ -93,7 +129,7 @@ The **OpenAI Realtime** media bridge runs on **Fly.io** (`micah-realtime-bridge`
 | Code | Meaning | Typical fix in this project |
 |------|---------|-----------------------------|
 | **31941** | Stream — invalid `track` on `<Connect><Stream>` | Only **`inbound_track`** is allowed with `Connect` (not `both_tracks`). See `app/api/voice/incoming/route.ts`. |
-| **13520** | Say — invalid text / voice+language mismatch | All `<Say>` fallbacks use **`Polly.Olivia`** + **`en-AU`** only. If Twilio still errors, check Twilio Console for region/voice availability. |
+| **13520** | Say — invalid text / voice+language mismatch | The `<Say>` verb is no longer used by this stack — brand policy forbids Polly fallback. All audio is `<Play>` of an ElevenLabs Aussie Micah MP3 or `MICAH_FALLBACK_MP3_URL`. If you see 13520, a stale Polly fallback has been reintroduced — search the codebase for `Polly` and `.say(` and remove. |
 
 ### Silence on realtime calls
 

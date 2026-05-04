@@ -4,11 +4,12 @@ This repo implements **Micah**: a young, warm, **always-female** Australian rece
 
 ## Non-negotiables
 
-- **Voice**: ElevenLabs Micah only — constant **`MICAH_ELEVENLABS_VOICE_ID`** = `4Nz4vG2f9omkfcS8r4PJ` in `micah-web/lib/elevenlabs-tts.ts` (hardcoded; no env). Never swap to male, Alice, or generic Twilio defaults.
-- **`<Say>` fallback**: Only **Polly.Olivia** + **en-AU** via `micahDirectiveOsSayAttributes()` in `micah-web/lib/micah/twilio-voice.ts`. No bare `.say()` without those attributes anywhere.
-- **Static `<Play>` URLs** (`MICAH_GREETING_MP3_URL`, `MICAH_FALLBACK_MP3_URL`): not ElevenLabs — if the file is male/wrong, callers hear that. Remove or replace bad assets; rely on EL + `MICAH_ELEVENLABS_VOICE_ID` when unsure.
-- **No silence**: Never ship TwiML that leaves the caller with only `<Pause>` or empty audio. If synthesis fails, they still hear Polly.Olivia reading an apology or script.
-- **In-character**: Micah never identifies as an AI, bot, assistant, chatbot, or automated system. Never say “assistant” or “bot” in persona-facing copy.
+- **Voice**: ElevenLabs Micah only — constant **`MICAH_ELEVENLABS_VOICE_ID`** = `4Nz4vG2f9omkfcS8r4PJ` in `micah-web/lib/elevenlabs-tts.ts` (hardcoded; no env). Never swap to male, Alice, Polly, or generic Twilio defaults.
+- **BRAND-STRICT POLICY**: All spoken output must originate from ElevenLabs Aussie Micah voice OR pre-recorded static MP3 audio approved by Directive OS. Polly/Olivia, default Twilio system voices, or any other fallback are forbidden. Fallback to silence is acceptable only when all assets are unavailable. No `<Say>` verbs, no `.say()` calls, no `MICAH_POLLY_VOICE` env var.
+- **TwiML helpers**: Use `playOrFallbackMp3` / `gatherPlayOrFallbackMp3` from `micah-web/lib/micah/twilio-voice.ts`. They emit `<Play>` for the EL URL, fall back to `MICAH_FALLBACK_MP3_URL <Play>`, then `<Pause>` if both are unavailable. The legacy `playOrPollyOliviaSay` / `gatherPlayOrPollyOliviaSay` / `micahDirectiveOsSayAttributes` are deleted.
+- **Static `<Play>` URLs** (`MICAH_GREETING_MP3_URL`, `MICAH_FALLBACK_MP3_URL`): not ElevenLabs — if the file is male/wrong, callers hear that. Verify all uploaded assets are the Aussie Micah voice.
+- **Silence**: Acceptable last resort under brand policy when both ElevenLabs and `MICAH_FALLBACK_MP3_URL` are unavailable. Logged loudly via `[micah/voice] … SILENT` so the operator can fix it. Never preferred over a wrong voice.
+- **In-character**: Micah never identifies as an AI, bot, assistant, chatbot, or automated system. Never say "assistant" or "bot" in persona-facing copy.
 
 ## Canonical greeting
 
@@ -30,11 +31,11 @@ Spoken sources: `micah-web/lib/micah/voice-greetings.ts` (`micahGatherOpeningSay
 
 ## Centralized voice output
 
-`micah-web/lib/micah/voice-output.ts` — `micahVoice()` + `applyMicahVoice()` are the single pipeline for Aussie EL → static MP3 → Polly.Olivia. Incoming webhook uses `preferredPlayUrl` (`MICAH_GREETING_MP3_URL`) for instant `<Play>` when set; otherwise bounded EL timeout (`defaultElevenLabsTtsTimeoutMs`, default 1500ms).
+`micah-web/lib/micah/voice-output.ts` — `micahVoice()` + `applyMicahVoice()` are the single pipeline for Aussie EL → `MICAH_FALLBACK_MP3_URL` static MP3 → silent `<Pause>` (brand policy: no Polly). Incoming webhook uses `preferredPlayUrl` (`MICAH_GREETING_MP3_URL`) for instant `<Play>` when set; otherwise bounded EL timeout (`defaultElevenLabsTtsTimeoutMs`, default 1500ms).
 
 ## Observability
 
-Prefer structured logs: `CallSid`, `From`/`To`, inbound route, whether empathy TTS was applied, **outgoing `mp3Url`** on `<Play>` paths, and explicit **why** on Polly or static fallbacks (`[micah/voice]`, `[micah/voice/apply]`, `[micah/voice/process]`).
+Prefer structured logs: `CallSid`, `From`/`To`, inbound route, whether empathy TTS was applied, **outgoing `mp3Url`** on `<Play>` paths, and explicit **why** on `MICAH_FALLBACK_MP3_URL` or silent fallbacks (`[micah/voice]`, `[micah/voice/apply]`, `[micah/voice/process]`).
 
 Many voice log payloads include **`micahVoiceQA: true`** and an **`event`** string so **Vercel → Project → Logs** can filter on one token.
 
@@ -63,18 +64,19 @@ Many voice log payloads include **`micahVoiceQA: true`** and an **`event`** stri
 ### Compliance (invariants)
 
 - ElevenLabs: only **`MICAH_ELEVENLABS_VOICE_ID`** = `4Nz4vG2f9omkfcS8r4PJ` in `micah-web/lib/elevenlabs-tts.ts` — no env override.
-- Polly: **Polly.Olivia** + **en-AU** only via **`micahDirectiveOsSayAttributes()`**.
+- Static MP3 fallback: **`MICAH_FALLBACK_MP3_URL`** + **`MICAH_GREETING_MP3_URL`** (must be Aussie Micah voice files).
+- Silent `<Pause>` only when both EL and `MICAH_FALLBACK_MP3_URL` are unavailable. Logged loudly. Polly is forbidden.
 - Logs: voice paths emit **`micahVoiceQA: true`**, **`event`**, **`voiceId`** (and pipeline notes) — see `lib/micah/twilio-voice.ts`, `lib/micah/voice-output.ts`, `lib/elevenlabs-tts.ts`, voice routes.
 
 ### After deploy — QA
 
 1. Place a **test call** (or exercise web voice if applicable).
-2. **Vercel → Logs** — filter **`micahVoiceQA`**. Expect **`voiceId`** / **`micahElevenLabsVoiceId`** = `4Nz4vG2f9omkfcS8r4PJ` on EL paths; investigate **`twiml_play_static_mp3`** or unexpected **`Polly`** if audio sounds wrong.
+2. **Vercel → Logs** — filter **`micahVoiceQA`**. Expect **`voiceId`** / **`micahElevenLabsVoiceId`** = `4Nz4vG2f9omkfcS8r4PJ` on EL paths; **`twiml_play_static_mp3`** for `MICAH_FALLBACK_MP3_URL` plays; **`twiml_apply_silent_pause`** (logged red) when both EL and the fallback MP3 are unavailable. Any reference to `Polly` in logs is a regression — search and remove.
 3. `GET https://<your-production-domain>/api/voice/diagnostic` — **`checks.micahElevenLabsVoiceId`**, **`overallStatus`**, **`blockedReasons`**.
 
 ### Cursor / AI mandate
 
-Any change that is meant to ship must end up on **`origin/master`** and in **Vercel production**: commit, push, verify deploy — do not leave fixes only local or on a side branch if production must match **`master`**. Do not reintroduce legacy voice env vars, Dialogflow-era Twilio wiring, or non-compliant Polly voices on **`master`** or in Vercel env.
+Any change that is meant to ship must end up on **`origin/master`** and in **Vercel production**: commit, push, verify deploy — do not leave fixes only local or on a side branch if production must match **`master`**. Do not reintroduce legacy voice env vars, Dialogflow-era Twilio wiring, `MICAH_POLLY_VOICE`, or any Polly fallback on **`master`** or in Vercel env. Brand policy: ElevenLabs Aussie Micah OR `MICAH_FALLBACK_MP3_URL` ONLY.
 
 ### Full sync: environment, code, and docs (mandatory)
 
@@ -99,7 +101,7 @@ Never leave a secret or production-only config **only** in Cursor, local `.env`,
 
 - **No** `AUSSIE_MICAH_VOICE_ID` and **no** `process.env.ELEVENLABS_VOICE_ID` (or any env-driven ElevenLabs voice id) in `micah-web`.  
 - **Single** ElevenLabs URL builder: `convertTextToSpeech` in `lib/elevenlabs-tts.ts` using **`MICAH_ELEVENLABS_VOICE_ID`**.  
-- **All** Twilio `.say(` paths use **`micahDirectiveOsSayAttributes()`** → **Polly.Olivia** + **en-AU** only.  
+- **Zero** Twilio `.say(` paths and zero `<Say>` verbs in code (brand policy: no Polly). All audio is `<Play>` of an ElevenLabs URL or `MICAH_FALLBACK_MP3_URL`.
 - **Hidden wrong-voice risk**: wrong **static MP3** URL, or **Realtime bridge** (separate host) using non-Micah audio — outside this Next bundle; treat static URLs as production config.
 
 ### Cursor session paste (context block)
@@ -110,9 +112,9 @@ Copy the following into a Cursor task, chat, or PR description when working on v
 
 - Never use `AUSSIE_MICAH_VOICE_ID`, `ELEVENLABS_VOICE_ID`, or any env-based indirection for voice selection in code.
 - Only use hardcoded **`MICAH_ELEVENLABS_VOICE_ID`** = `4Nz4vG2f9omkfcS8r4PJ` for ElevenLabs (`micah-web/lib/elevenlabs-tts.ts`).
-- All Polly fallbacks must be **Polly.Olivia** (female AU) with **`micahDirectiveOsSayAttributes()`** in `micah-web/lib/micah/twilio-voice.ts` — never default, Alice, or male.
-- For every voice path (EL, Polly, MP3), log **`micahVoiceQA: true`** and include **`event`**, **`voiceId`** (the hardcoded Micah EL id for app-wide audit), and pipeline notes (`lib/elevenlabs-tts.ts`, `lib/micah/voice-output.ts`, `lib/micah/twilio-voice.ts`, routes).
-- Static greeting/fallback MP3 URLs (`MICAH_GREETING_MP3_URL` / `MICAH_FALLBACK_MP3_URL`) must only refer to files with a **verified** female Aussie Micah voice — if not, clear or correct them.
+- **Polly is forbidden.** No `<Say>` verbs, no `.say()` calls, no `MICAH_POLLY_VOICE` env var, no `Polly.Olivia` references in voice code paths. The legacy `micahDirectiveOsSayAttributes` / `playOrPollyOliviaSay` / `gatherPlayOrPollyOliviaSay` helpers are deleted; use **`playOrFallbackMp3`** / **`gatherPlayOrFallbackMp3`** which emit `<Play>` of `MICAH_FALLBACK_MP3_URL` or `<Pause>` (silent — logged) instead.
+- For every voice path (EL, MP3 fallback, silent), log **`micahVoiceQA: true`** and include **`event`**, **`voiceId`** (the hardcoded Micah EL id for app-wide audit), and pipeline notes (`lib/elevenlabs-tts.ts`, `lib/micah/voice-output.ts`, `lib/micah/twilio-voice.ts`, routes).
+- Static greeting/fallback MP3 URLs (`MICAH_GREETING_MP3_URL` / `MICAH_FALLBACK_MP3_URL`) must only refer to files with a **verified** Aussie Micah voice — if not, clear or correct them.
 - Always run **`npx tsc --noEmit`** in `micah-web` before deploy.
 - After deploying, verify via **live test call** and check **Vercel logs** for `voiceId` = `4Nz4vG2f9omkfcS8r4PJ` and **`micahVoiceQA`** events.
 
@@ -128,7 +130,7 @@ Do not allow any indirect voice logic or accidental overrides in future code or 
 | Empathy keyword + EL opts | `micah-web/lib/micah/micah-empathy-tts.ts` |
 | Sole ElevenLabs voice id constant | `micah-web/lib/elevenlabs-tts.ts` (`MICAH_ELEVENLABS_VOICE_ID`) |
 | EL + Supabase upload | `micah-web/lib/micah/elevenlabs-tts.ts` |
-| Polly-only helpers | `micah-web/lib/micah/twilio-voice.ts` |
+| TwiML `<Play>`-or-`MICAH_FALLBACK_MP3_URL` helpers (no Polly) | `micah-web/lib/micah/twilio-voice.ts` |
 | Voice webhook | `micah-web/app/api/voice/process/route.ts`, `incoming/route.ts` |
 
 When adding features, preserve **persona**, **gender/voice lock**, and the **no-silence** guarantee.

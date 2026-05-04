@@ -1,7 +1,7 @@
 import twilio from "twilio";
 import type { NextRequest } from "next/server";
 import { plainErrorTwiMLResponse, twimlResponse } from "@/lib/micah/twiml-fallback";
-import { MICAH_SAY_LANGUAGE, playOrPollyOliviaSay } from "@/lib/micah/twilio-voice";
+import { MICAH_SAY_LANGUAGE, playOrFallbackMp3 } from "@/lib/micah/twilio-voice";
 import { defaultElevenLabsTtsTimeoutMs } from "@/lib/micah/elevenlabs-tts";
 import { applyMicahVoice, micahVoice } from "@/lib/micah/voice-output";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
@@ -29,8 +29,9 @@ function formString(form: FormData, key: string): string {
 
 /**
  * First spoken line uses {@link micahVoice} + {@link applyMicahVoice} (ElevenLabs Aussie Micah,
- * or `MICAH_GREETING_MP3_URL` / Polly.Olivia). When no static greeting URL is set, EL runs under
- * {@link defaultElevenLabsTtsTimeoutMs} so the webhook stays within typical serverless limits.
+ * or `MICAH_GREETING_MP3_URL` / `MICAH_FALLBACK_MP3_URL`). When no static greeting URL is set,
+ * EL runs under {@link defaultElevenLabsTtsTimeoutMs} so the webhook stays within typical
+ * serverless limits. Brand policy: Aussie Micah ElevenLabs OR static MP3 only — no Polly.
  */
 export const maxDuration = 60;
 export const runtime = "nodejs";
@@ -170,7 +171,7 @@ export async function POST(request: NextRequest) {
     });
     applyMicahVoice(gather, openingResult);
 
-    playOrPollyOliviaSay(twiml, null, timeoutLine);
+    playOrFallbackMp3(twiml, null, timeoutLine);
     twiml.hangup();
 
     console.log(

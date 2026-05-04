@@ -11,8 +11,8 @@ import {
 import { buildMicahVoiceSystemPrompt } from "@/lib/openai/micah-voice-chat";
 import {
   MICAH_SAY_LANGUAGE,
-  gatherPlayOrPollyOliviaSay,
-  playOrPollyOliviaSay,
+  gatherPlayOrFallbackMp3,
+  playOrFallbackMp3,
 } from "@/lib/micah/twilio-voice";
 import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
 import { classifyMicahVoiceInbound } from "@/lib/micah/micah-directive-os-persona";
@@ -67,7 +67,7 @@ async function buildContinuationTwiML(
       micahElevenLabsOptsForUtterance(aiReply)
     );
   }
-  playOrPollyOliviaSay(vr, mainUrl, aiReply);
+  playOrFallbackMp3(vr, mainUrl, aiReply);
 
   const followText = `${MICAH_GATHER_FOLLOWUP_PROMPT} I'm listening.`;
   const byeText = "Thanks for calling — goodbye for now.";
@@ -100,9 +100,9 @@ async function buildContinuationTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  gatherPlayOrPollyOliviaSay(gather, followUrl, followText);
+  gatherPlayOrFallbackMp3(gather, followUrl, followText);
 
-  playOrPollyOliviaSay(vr, byeUrl, byeText);
+  playOrFallbackMp3(vr, byeUrl, byeText);
   vr.hangup();
   return vr.toString();
 }
@@ -128,7 +128,7 @@ async function buildEmptySpeechTwiML(
       micahElevenLabsOptsForUtterance(repeatLine)
     );
   }
-  playOrPollyOliviaSay(
+  playOrFallbackMp3(
     vr,
     line1,
     "Sorry, could you please repeat that?"
@@ -165,13 +165,13 @@ async function buildEmptySpeechTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  gatherPlayOrPollyOliviaSay(
+  gatherPlayOrFallbackMp3(
     gather,
     gUrl,
     "Go ahead whenever you're ready — I'm listening."
   );
 
-  playOrPollyOliviaSay(
+  playOrFallbackMp3(
     vr,
     byeUrl,
     "I'll let you go for now — feel free to call back anytime. Bye!"
@@ -182,7 +182,7 @@ async function buildEmptySpeechTwiML(
 
 export async function GET() {
   return new Response(
-    "POST /api/voice/process — Micah AI reply + gather loop (ElevenLabs + Polly.Olivia fallback)",
+    "POST /api/voice/process — Micah AI reply + gather loop (ElevenLabs Aussie Micah; MICAH_FALLBACK_MP3_URL on synth failure; silent <Pause> if both unavailable — brand policy: no Polly)",
     {
       status: 200,
       headers: { "Content-Type": "text/plain; charset=utf-8" },
@@ -254,7 +254,9 @@ async function handleProcess(request: Request) {
     micahVoiceQA: true,
     event: "voice_process_session_el_voice",
     voiceId: MICAH_ELEVENLABS_VOICE_ID,
-    pollyFallback: "Polly.Olivia en-AU only if EL path fails",
+    fallbackMp3Configured: !!process.env.MICAH_FALLBACK_MP3_URL?.trim(),
+    brandPolicy:
+      "Aussie Micah ElevenLabs OR MICAH_FALLBACK_MP3_URL only — Polly forbidden, silent <Pause> if both unavailable",
   });
   if (!canUseElevenLabsTts(supabase)) {
     console.error("[micah/voice/process] ElevenLabs blocked:", micahTtsBlockedReasons());

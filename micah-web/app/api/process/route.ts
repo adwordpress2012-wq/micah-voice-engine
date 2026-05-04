@@ -18,8 +18,8 @@ import {
 import { buildMicahDirectiveProcessSystemPrompt } from "@/lib/micah/micah-directive-os-persona";
 import {
   MICAH_SAY_LANGUAGE,
-  gatherPlayOrPollyOliviaSay,
-  playOrPollyOliviaSay,
+  gatherPlayOrFallbackMp3,
+  playOrFallbackMp3,
 } from "@/lib/micah/twilio-voice";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -90,7 +90,7 @@ async function buildOpeningTwiml(
     }
   }
 
-  playOrPollyOliviaSay(vr, greetUrl, greeting);
+  playOrFallbackMp3(vr, greetUrl, greeting);
 
   const gather = vr.gather({
     input: ["speech"],
@@ -100,9 +100,9 @@ async function buildOpeningTwiml(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  gatherPlayOrPollyOliviaSay(gather, listenUrl, "I'm listening.");
+  gatherPlayOrFallbackMp3(gather, listenUrl, "I'm listening.");
 
-  playOrPollyOliviaSay(
+  playOrFallbackMp3(
     vr,
     timeoutUrl,
     "I'll hang up — feel free to call back anytime."
@@ -157,7 +157,7 @@ async function buildConversationTwiml(
     bye = rest[2];
   }
 
-  playOrPollyOliviaSay(vr, mainUrl, assistantLine);
+  playOrFallbackMp3(vr, mainUrl, assistantLine);
 
   const gather = vr.gather({
     input: ["speech"],
@@ -167,13 +167,13 @@ async function buildConversationTwiml(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  gatherPlayOrPollyOliviaSay(
+  gatherPlayOrFallbackMp3(
     gather,
     q,
     "Anything else I can help with?"
   );
 
-  playOrPollyOliviaSay(vr, bye, "Thanks for calling — goodbye for now.");
+  playOrFallbackMp3(vr, bye, "Thanks for calling — goodbye for now.");
   vr.hangup();
   return vr.toString();
 }

@@ -1,81 +1,121 @@
 /**
- * Twilio Voice: Gather uses `en-AU` for speech recognition. Spoken output prefers ElevenLabs `<Play>`,
- * with **Polly.Olivia** + **en-AU** fallback (Directive OS — never implicit male / generic Twilio `<Say>` defaults).
+ * Twilio Voice helpers — BRAND-STRICT POLICY:
  *
- * Every branch logs **`micahVoiceQA`** (see Directive OS `AGENTS.md` — Cursor session paste).
+ *   "All spoken output must originate from ElevenLabs Aussie Micah voice
+ *    (id=4Nz4vG2f9omkfcS8r4PJ) or pre-recorded static MP3 audio approved by
+ *    Directive OS. Polly/Olivia, default Twilio system voices, or any other
+ *    fallback are forbidden. Fallback to silence is acceptable only when all
+ *    assets are unavailable. No other TTS system shall be present in this
+ *    pipeline."
+ *
+ * `<Gather>` still uses `language="en-AU"` for speech-recognition (STT) hints
+ * — that's not TTS. The legacy Polly helpers (`micahDirectiveOsSayAttributes`,
+ * `playOrPollyOliviaSay`, `gatherPlayOrPollyOliviaSay`) have been deleted.
+ *
+ * Every branch logs `micahVoiceQA: true` for the audit trail.
  */
 
 import twilio from "twilio";
 import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
 
-/** Speech recognition language for `<Gather>` (STT). */
+/** Speech recognition language for `<Gather>` (STT). NOT a TTS attribute. */
 export const MICAH_SAY_LANGUAGE = "en-AU";
 
 type TwilioVoice = import("twilio/lib/twiml/VoiceResponse");
 type GatherInstance = ReturnType<TwilioVoice["gather"]>;
-
-/** Explicit Australian female Polly voice — used whenever `<Play>` URL is unavailable. */
-export function micahDirectiveOsSayAttributes(): TwilioVoice["SayAttributes"] {
-  return {
-    voice: "Polly.Olivia",
-    language: MICAH_SAY_LANGUAGE as TwilioVoice["SayLanguage"],
-  };
-}
-
 type VoiceResponseInstance = InstanceType<typeof twilio.twiml.VoiceResponse>;
+
+/** Single source of truth for the static MP3 fallback URL. */
+function micahFallbackMp3Url(): string | null {
+  return process.env.MICAH_FALLBACK_MP3_URL?.trim() || null;
+}
 
 function logMicahVoiceQaTwilioVerb(opts: {
   event: string;
   usedPlay: boolean;
   mp3Url: string | null | undefined;
-  fallbackSayChars: number;
+  staticMp3Url: string | null;
+  intendedTextChars: number;
 }): void {
-  const u = opts.mp3Url?.trim() ?? "";
   console.log("[micah/twilio-voice]", {
     micahVoiceQA: true,
     event: opts.event,
     voiceId: MICAH_ELEVENLABS_VOICE_ID,
     usedPlay: opts.usedPlay,
-    pollyVoice: opts.usedPlay ? null : "Polly.Olivia",
-    pollyLanguage: opts.usedPlay ? null : MICAH_SAY_LANGUAGE,
     pipeline: opts.usedPlay
-      ? "Twilio <Play> — URL from caller (EL→Supabase MP3 or static asset); EL voice id in app is hardcoded only"
-      : "Twilio <Say> — Polly.Olivia + en-AU via micahDirectiveOsSayAttributes() only",
-    mp3UrlPreview: u ? u.slice(0, 160) : null,
-    fallbackSayChars: opts.fallbackSayChars,
+      ? "Twilio <Play> — primary URL (ElevenLabs Aussie Micah MP3 from Supabase)"
+      : opts.staticMp3Url
+        ? "Twilio <Play> — MICAH_FALLBACK_MP3_URL static asset (pre-recorded Aussie Micah)"
+        : "SILENT — both ElevenLabs AND MICAH_FALLBACK_MP3_URL unavailable; brand policy forbids Polly fallback",
+    primaryMp3UrlPreview: opts.mp3Url?.trim().slice(0, 160) || null,
+    fallbackMp3UrlPreview: opts.staticMp3Url?.slice(0, 160) || null,
+    intendedTextChars: opts.intendedTextChars,
+    brandPolicy:
+      "Aussie Micah ElevenLabs OR static MP3 only — Polly/Olivia/default voices forbidden",
   });
 }
 
-/** `<Play>` when URL exists; otherwise `<Say voice="Polly.Olivia" language="en-AU">` — never empty audio path. */
-export function playOrPollyOliviaSay(
+/**
+ * Emit `<Play>` for `mp3Url` when present; otherwise `<Play>` the
+ * `MICAH_FALLBACK_MP3_URL` static asset; otherwise `<Pause>` (silent — logged
+ * loudly). NEVER emits `<Say>`. The `intendedText` argument is preserved for
+ * logging only — it is never spoken.
+ */
+export function playOrFallbackMp3(
   vr: VoiceResponseInstance,
   mp3Url: string | null | undefined,
-  fallbackSayText: string
+  intendedText: string
 ): void {
   const u = mp3Url?.trim();
+  const fb = micahFallbackMp3Url();
   logMicahVoiceQaTwilioVerb({
-    event: "play_or_polly_olivia_voice_response",
+    event: "play_or_fallback_voice_response",
     usedPlay: !!u,
     mp3Url,
-    fallbackSayChars: fallbackSayText.length,
+    staticMp3Url: fb,
+    intendedTextChars: intendedText.length,
   });
-  if (u) vr.play(u);
-  else vr.say(micahDirectiveOsSayAttributes(), fallbackSayText);
+  if (u) {
+    vr.play(u);
+    return;
+  }
+  if (fb) {
+    vr.play(fb);
+    return;
+  }
+  console.error(
+    "[micah/twilio-voice] SILENT <Pause> — MICAH_FALLBACK_MP3_URL not set and ElevenLabs unavailable. Caller will hear silence. Brand policy forbids Polly. Intended text (NOT spoken):",
+    intendedText.slice(0, 200)
+  );
+  vr.pause({ length: 1 });
 }
 
-/** Same as {@link playOrPollyOliviaSay} for verbs nested under `<Gather>`. */
-export function gatherPlayOrPollyOliviaSay(
+/** Same as {@link playOrFallbackMp3} for verbs nested under `<Gather>`. */
+export function gatherPlayOrFallbackMp3(
   gather: GatherInstance,
   mp3Url: string | null | undefined,
-  fallbackSayText: string
+  intendedText: string
 ): void {
   const u = mp3Url?.trim();
+  const fb = micahFallbackMp3Url();
   logMicahVoiceQaTwilioVerb({
-    event: "play_or_polly_olivia_gather",
+    event: "play_or_fallback_gather",
     usedPlay: !!u,
     mp3Url,
-    fallbackSayChars: fallbackSayText.length,
+    staticMp3Url: fb,
+    intendedTextChars: intendedText.length,
   });
-  if (u) gather.play(u);
-  else gather.say(micahDirectiveOsSayAttributes(), fallbackSayText);
+  if (u) {
+    gather.play(u);
+    return;
+  }
+  if (fb) {
+    gather.play(fb);
+    return;
+  }
+  console.error(
+    "[micah/twilio-voice] SILENT <Pause> in <Gather> — MICAH_FALLBACK_MP3_URL not set and ElevenLabs unavailable. Caller will hear silence. Brand policy forbids Polly. Intended text (NOT spoken):",
+    intendedText.slice(0, 200)
+  );
+  gather.pause({ length: 1 });
 }
