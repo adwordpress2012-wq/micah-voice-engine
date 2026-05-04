@@ -1,0 +1,61 @@
+import { createHash } from "crypto";
+import { readFileSync, existsSync } from "fs";
+import { execSync } from "child_process";
+
+// --- CONFIG ---
+// List all MP3 URLs to audit and their approved .sha256 reference
+const assets = [
+  {
+    url: process.env.MICAH_GREETING_MP3_URL,
+    ref: "voice/snapshots/greeting-approved.sha256",
+    label: "greeting",
+    fname: "greeting-approved.mp3",
+  },
+  {
+    url: process.env.MICAH_FALLBACK_MP3_URL,
+    ref: "voice/snapshots/fallback-approved.sha256",
+    label: "fallback",
+    fname: "fallback-approved.mp3",
+  },
+];
+
+function sha256(filePath: string): string {
+  const data = readFileSync(filePath);
+  return createHash("sha256").update(data).digest("hex");
+}
+
+let errored = false;
+assets.forEach(({ url, ref, label, fname }) => {
+  if (!url) {
+    console.log(`[${label}] No URL set (env missing). Skipping.`);
+    return;
+  }
+  try {
+    const localPath = `/tmp/${fname}`;
+    execSync(`curl -sSL "${url}" -o "${localPath}"`);
+    if (!existsSync(localPath)) {
+      console.error(`[${label}] Failed to download MP3 (url: ${url})`);
+      errored = true;
+      return;
+    }
+    const actual = sha256(localPath);
+    const expected = readFileSync(ref, "utf8").trim();
+    if (actual !== expected) {
+      console.error(
+        `[${label}] MP3 hash mismatch!\n  url: ${url}\n  expected: ${expected}\n  actual:   ${actual}\n  ACTION: Replace this file with the approved female Aussie Micah MP3.`
+      );
+      errored = true;
+    } else {
+      console.log(`[${label}] MP3 verified. SHA256 matches approved asset.`);
+    }
+  } catch (e) {
+    console.error(`[${label}] ERROR: ${e}`);
+    errored = true;
+  }
+});
+
+if (errored) {
+  process.exit(1);
+} else {
+  console.log("✅ All checked MP3s match the approved Aussie Micah assets.");
+}
