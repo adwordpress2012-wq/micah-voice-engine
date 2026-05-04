@@ -46,9 +46,23 @@ curl -s "https://micah.directiveos.com.au/api/voice/diagnostic" | jq .overallSta
 - **`yellow`**: Some env vars look present but synth is not ready — inspect **`blockedReasons`** and **`checks`** in the JSON.
 - **`red`**: Critical env missing — **`blockedReasons`** lists what to fix (e.g. `no ELEVENLABS_API_KEY`, `no SUPABASE_TTS_BUCKET`).
 
-## Vercel environment variables
+## Environment sync (GitHub, Vercel, local)
 
-After changing env vars, **redeploy Production**. See `.env.example` for `MICAH_VOICE_ENGINE`, `MICAH_MEDIA_STREAM_WSS_URL`, `MICAH_BRIDGE_SECRET`, `OPENAI_API_KEY`, `TWILIO_AUTH_TOKEN`, etc.
+- **GitHub `master`:** Source code and **`micah-web/.env.example`** (names only, no secrets). Every deployable change should be committed and pushed — see repo root **`AGENTS.md`** (“Deployment” + “Full sync”).
+- **Vercel Production:** **Runtime secrets** — `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_URL` (or `NEXT_PUBLIC_SUPABASE_URL`), `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `SUPABASE_TTS_BUCKET`, `NEXT_PUBLIC_APP_URL`, `TWILIO_AUTH_TOKEN` / `TWILIO_ACCOUNT_SID` (for signed webhooks), etc. After changing env vars, **Redeploy Production** so new values apply.
+- **Local:** Copy **`micah-web/.env.example`** → **`.env`** or **`.env.local`** inside **`micah-web/`** for development. Keep **variable names** aligned with Vercel; **never commit** real `.env` / `.env.local` files.
+
+### Vercel checklist
+
+After changing env vars, **redeploy Production**. Full list of keys and comments: **`micah-web/.env.example`** (also `MICAH_VOICE_ENGINE`, `MICAH_MEDIA_STREAM_WSS_URL`, `MICAH_BRIDGE_SECRET`, Resend, tenant columns, etc., as needed).
+
+### Production health
+
+```bash
+curl -s "https://YOUR_PRODUCTION_DOMAIN/api/voice/diagnostic" | jq .overallStatus,.blockedReasons
+```
+
+Expect **`overallStatus`: `"green"`** and **`blockedReasons`: []** when ElevenLabs + Supabase + OpenAI are correctly configured on that deployment.
 
 ## Fly.io (`micah-web`)
 

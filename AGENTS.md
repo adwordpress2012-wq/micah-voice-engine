@@ -76,6 +76,25 @@ Many voice log payloads include **`micahVoiceQA: true`** and an **`event`** stri
 
 Any change that is meant to ship must end up on **`origin/master`** and in **Vercel production**: commit, push, verify deploy — do not leave fixes only local or on a side branch if production must match **`master`**. Do not reintroduce legacy voice env vars, Dialogflow-era Twilio wiring, or non-compliant Polly voices on **`master`** or in Vercel env.
 
+### Full sync: environment, code, and docs (mandatory)
+
+**Sources of truth:**
+
+| What | Where |
+|------|--------|
+| Application **code** and **committed docs** | **`master` on GitHub** — always pull before work; stage, commit, push every intentional change. Nothing production-critical should exist only in Cursor or an unpushed branch. |
+| **Runtime secrets** (API keys, service role, Twilio tokens) | **Vercel Production** (and Preview if you use it) — not in chat, not only on a developer laptop. |
+| **Local development** | **`micah-web/.env`** or **`micah-web/.env.local`** — copy variable **names** from **`micah-web/.env.example`**; paste **values** from your secrets manager or Vercel export. Same keys must exist in Vercel for production with production values. |
+
+**Before declaring production aligned:**
+
+1. **Git:** `git status` clean on **`master`**; **`git push origin master`** done; GitHub shows the latest commit.
+2. **Vercel:** Production env includes at minimum the keys required for voice green — see **`micah-web/.env.example`** and **`buildVoiceEnvDiagnostics`** (`ELEVENLABS_API_KEY`, `SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_TTS_BUCKET`, `OPENAI_API_KEY`, plus **`NEXT_PUBLIC_APP_URL`** for Twilio gather URLs). Redeploy after env edits.
+3. **Diagnostic:** `GET /api/voice/diagnostic` on the **production** host — target **`overallStatus`: `"green"`** and **`blockedReasons`: []** (empty). **`yellow`** / **`red`** mean fix env or connectivity before treating prod as healthy.
+4. **Documentation:** If you add or rename env vars, update **`micah-web/.env.example`** and this **`AGENTS.md`** (and **`README.md`** if operators need a runbook change), then **commit and push** those doc updates with the code.
+
+Never leave a secret or production-only config **only** in Cursor, local `.env`, or a paste — mirror required keys into **Vercel** and keep **`.env.example`** accurate for names and intent.
+
 ### Cross-check (repo audit — done)
 
 - **No** `AUSSIE_MICAH_VOICE_ID` and **no** `process.env.ELEVENLABS_VOICE_ID` (or any env-driven ElevenLabs voice id) in `micah-web`.  
