@@ -38,18 +38,43 @@ Prefer structured logs: `CallSid`, `From`/`To`, inbound route, whether empathy T
 
 Many voice log payloads include **`micahVoiceQA: true`** and an **`event`** string so **Vercel → Project → Logs** can filter on one token.
 
-### Vercel (current host) — deploy checklist & QA
+## Deployment: single source of truth (`master` + Vercel)
 
-1. **Deploy** `micah-web` to production; confirm Twilio **Voice webhook** URL is your **production** Vercel origin (not a preview URL behind auth).
-2. **Vercel → Settings → Environment Variables (Production)**  
-   - Remove any legacy **`AUSSIE_MICAH_VOICE_ID`**, **`ELEVENLABS_VOICE_ID`**, or other “voice id” env vars — they are **not read**; only **`MICAH_ELEVENLABS_VOICE_ID`** in code (`4Nz4vG2f9omkfcS8r4PJ`) is used for ElevenLabs.  
-   - Required for EL path: **`ELEVENLABS_API_KEY`**, **`SUPABASE_URL`** (or **`NEXT_PUBLIC_SUPABASE_URL`**), **`SUPABASE_SERVICE_ROLE_KEY`**, **`SUPABASE_TTS_BUCKET`**, **`OPENAI_API_KEY`** (for gather replies).  
-   - **`MICAH_GREETING_MP3_URL` / `MICAH_FALLBACK_MP3_URL`**: optional `<Play>` assets — **not** synthesised by ElevenLabs. If a male/wrong MP3 is hosted here, callers hear it. Clear or replace unless the file is verified female Aussie Micah.
-3. **After one test call**, in Vercel Logs search: **`micahVoiceQA`**  
-   - **`event: "elevenlabs_tts_ok"`** / **`micah_voice_el_play_url`** → EL wire path used; **`voiceId`** / **`micahElevenLabsVoiceId`** must be **`4Nz4vG2f9omkfcS8r4PJ`**.  
-   - **`event: "twiml_play_static_mp3"`** → static greeting `<Play>`; audit **`mp3Url`** (wrong file = wrong gender).  
-   - **`event: "micah_voice_polly_olivia_say"`** / **`twiml_apply_say_polly_olivia`** → Polly fallback only (**female en-AU**).
-4. **API**: `GET https://<your-vercel-domain>/api/voice/diagnostic` — confirm **`checks.micahElevenLabsVoiceId`** and **`overallStatus`** / **`blockedReasons`**.
+**Primary rule:** Production on Vercel must reflect the **current `master` branch on GitHub** — correct code, env, and assets. Do not deploy from a stale clone, unmerged local-only work, or the wrong branch.
+
+### Git workflow (before every ship)
+
+1. `git fetch origin && git checkout master && git pull origin master` — local **`master`** must match **`origin/master`** before you commit or push.
+2. From repo root: `cd micah-web && npx tsc --noEmit` — TypeScript must pass.
+3. Commit with a clear message; **`git push origin master`** — this is the canonical trigger when Vercel is connected to auto-deploy **`master`**.
+4. On GitHub, confirm the latest commit is on **`master`** (not only on your machine).
+
+### Vercel
+
+- Prefer **automatic production deploy** on push to **`master`**. If needed, **Vercel Dashboard → Deployments → Redeploy** the latest deployment that shows source branch **`master`** and the expected commit SHA.
+- Confirm Twilio **Voice webhook** URL points at your **production** Vercel origin (not a preview URL behind Deployment Protection).
+
+### Environment variables (Production and Preview)
+
+- **Remove obsolete:** `AUSSIE_MICAH_VOICE_ID`, `ELEVENLABS_VOICE_ID` — the app does **not** read them for voice selection; they confuse operators.
+- **Required for ElevenLabs path:** `ELEVENLABS_API_KEY`, `SUPABASE_URL` (or `NEXT_PUBLIC_SUPABASE_URL`), `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_TTS_BUCKET`, `OPENAI_API_KEY` (gather replies).
+- **Static MP3 (optional):** `MICAH_GREETING_MP3_URL`, `MICAH_FALLBACK_MP3_URL` — must be **verified female Aussie Micah** audio only; wrong files bypass EL. In ops, you may record an approved asset hash and compare after uploads.
+
+### Compliance (invariants)
+
+- ElevenLabs: only **`MICAH_ELEVENLABS_VOICE_ID`** = `4Nz4vG2f9omkfcS8r4PJ` in `micah-web/lib/elevenlabs-tts.ts` — no env override.
+- Polly: **Polly.Olivia** + **en-AU** only via **`micahDirectiveOsSayAttributes()`**.
+- Logs: voice paths emit **`micahVoiceQA: true`**, **`event`**, **`voiceId`** (and pipeline notes) — see `lib/micah/twilio-voice.ts`, `lib/micah/voice-output.ts`, `lib/elevenlabs-tts.ts`, voice routes.
+
+### After deploy — QA
+
+1. Place a **test call** (or exercise web voice if applicable).
+2. **Vercel → Logs** — filter **`micahVoiceQA`**. Expect **`voiceId`** / **`micahElevenLabsVoiceId`** = `4Nz4vG2f9omkfcS8r4PJ` on EL paths; investigate **`twiml_play_static_mp3`** or unexpected **`Polly`** if audio sounds wrong.
+3. `GET https://<your-production-domain>/api/voice/diagnostic` — **`checks.micahElevenLabsVoiceId`**, **`overallStatus`**, **`blockedReasons`**.
+
+### Cursor / AI mandate
+
+Any change that is meant to ship must end up on **`origin/master`** and in **Vercel production**: commit, push, verify deploy — do not leave fixes only local or on a side branch if production must match **`master`**. Do not reintroduce legacy voice env vars, Dialogflow-era Twilio wiring, or non-compliant Polly voices on **`master`** or in Vercel env.
 
 ### Cross-check (repo audit — done)
 
