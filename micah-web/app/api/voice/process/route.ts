@@ -1,6 +1,5 @@
 import OpenAI from "openai";
 import twilio from "twilio";
-import { Resend } from "resend";
 import { plainErrorTwiMLResponse, twimlResponse } from "@/lib/micah/twiml-fallback";
 import {
   MICAH_GATHER_FOLLOWUP_PROMPT,
@@ -8,29 +7,27 @@ import {
   clampTranscriptForModel,
   sanitizeForMicahSpeech,
 } from "@/lib/micah/micah-voice-persona";
-import { buildMicahVoiceSystemPrompt } from "@/lib/openai/micah-voice-chat";
 import {
-  MICAH_SAY_LANGUAGE,
-  gatherPlayOrFallbackMp3,
-  playOrFallbackMp3,
-} from "@/lib/micah/twilio-voice";
+  buildMicahVoiceSystemPrompt,
+  MICAH_VOICE_CHAT_MODEL,
+  MICAH_VOICE_CHAT_TEMPERATURE,
+} from "@/lib/openai/micah-voice-chat";
+import { MICAH_SAY_LANGUAGE } from "@/lib/micah/twilio-voice";
 import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
-import {
-  classifyMicahVoiceInbound,
-  getMicahAgencyName,
-} from "@/lib/micah/micah-directive-os-persona";
-import {
-  micahElevenLabsOptsForUtterance,
-  textSuggestsEmpatheticTts,
-} from "@/lib/micah/micah-empathy-tts";
+import { classifyMicahVoiceInbound } from "@/lib/micah/micah-directive-os-persona";
+import { textSuggestsEmpatheticTts } from "@/lib/micah/micah-empathy-tts";
 import { maskApiCredential } from "@/lib/micah/mask-api-credential";
 import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import {
   canUseElevenLabsTts,
   defaultElevenLabsTtsTimeoutMs,
-  elevenLabsTtsPublicMp3UrlWithTimeout,
   micahTtsBlockedReasons,
 } from "@/lib/micah/elevenlabs-tts";
+import {
+  micahReplyLooksLikeLeadWrapUp,
+  sendMicahLeadSummaryEmail,
+} from "@/lib/micah/micah-lead-resend";
+import { applyMicahVoice, micahVoice } from "@/lib/micah/voice-output";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -41,7 +38,8 @@ export const maxDuration = 60;
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const MODEL = process.env.OPENAI_CHAT_MODEL ?? "gpt-4o-mini";
+const MODEL =
+  process.env.OPENAI_CHAT_MODEL?.trim() || MICAH_VOICE_CHAT_MODEL;
 const OPENAI_TIMEOUT_MS = 25_000;
 
 function formString(form: FormData, key: string): string {
@@ -49,51 +47,47 @@ function formString(form: FormData, key: string): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
+/**
+ * TwiML for Micah's reply then `<Gather>` — all playable lines go through {@link micahVoice} /
+ * {@link applyMicahVoice} (Aussie Micah ElevenLabs or approved MP3 fallback; `<Gather>` preserved).
+ */
 async function buildContinuationTwiML(
   aiReply: string,
   processUrl: string,
   supabase: SupabaseClient | null,
-  callSid: string,
-  replyMp3Url: string | null
+  callSid: string
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
   const budget = defaultElevenLabsTtsTimeoutMs();
 
-  let mainUrl = replyMp3Url?.trim() || null;
-  if (!mainUrl && supabase) {
-    mainUrl = await elevenLabsTtsPublicMp3UrlWithTimeout(
-      supabase,
-      aiReply,
-      sid,
-      budget,
-      micahElevenLabsOptsForUtterance(aiReply)
-    );
-  }
-  playOrFallbackMp3(vr, mainUrl, aiReply);
+  const replyResult = await micahVoice({
+    text: aiReply,
+    callSid: sid,
+    supabase,
+    label: "voice-process-reply",
+    ttsBudgetMs: budget,
+  });
+  applyMicahVoice(vr, replyResult);
 
   const followText = `${MICAH_GATHER_FOLLOWUP_PROMPT} I'm listening.`;
   const byeText = "Thanks for calling — goodbye for now.";
-  let followUrl: string | null = null;
-  let byeUrl: string | null = null;
-  if (supabase) {
-    [followUrl, byeUrl] = await Promise.all([
-      elevenLabsTtsPublicMp3UrlWithTimeout(
-        supabase,
-        followText,
-        sid,
-        budget,
-        micahElevenLabsOptsForUtterance(followText)
-      ),
-      elevenLabsTtsPublicMp3UrlWithTimeout(
-        supabase,
-        byeText,
-        sid,
-        budget,
-        micahElevenLabsOptsForUtterance(byeText)
-      ),
-    ]);
-  }
+  const [followResult, byeResult] = await Promise.all([
+    micahVoice({
+      text: followText,
+      callSid: sid,
+      supabase,
+      label: "voice-process-gather-follow",
+      ttsBudgetMs: budget,
+    }),
+    micahVoice({
+      text: byeText,
+      callSid: sid,
+      supabase,
+      label: "voice-process-bye",
+      ttsBudgetMs: budget,
+    }),
+  ]);
 
   const gather = vr.gather({
     input: ["speech"],
@@ -103,9 +97,9 @@ async function buildContinuationTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  gatherPlayOrFallbackMp3(gather, followUrl, followText);
+  applyMicahVoice(gather, followResult);
 
-  playOrFallbackMp3(vr, byeUrl, byeText);
+  applyMicahVoice(vr, byeResult);
   vr.hangup();
   return vr.toString();
 }
@@ -113,53 +107,42 @@ async function buildContinuationTwiML(
 async function buildEmptySpeechTwiML(
   processUrl: string,
   supabase: SupabaseClient | null,
-  callSid: string,
-  firstLineMp3Url: string | null
+  callSid: string
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
   const budget = defaultElevenLabsTtsTimeoutMs();
 
-  let line1 = firstLineMp3Url?.trim() || null;
   const repeatLine = "Sorry, could you please repeat that?";
-  if (!line1 && supabase) {
-    line1 = await elevenLabsTtsPublicMp3UrlWithTimeout(
-      supabase,
-      repeatLine,
-      sid,
-      budget,
-      micahElevenLabsOptsForUtterance(repeatLine)
-    );
-  }
-  playOrFallbackMp3(
-    vr,
-    line1,
-    "Sorry, could you please repeat that?"
-  );
+  const repeatResult = await micahVoice({
+    text: repeatLine,
+    callSid: sid,
+    supabase,
+    label: "voice-process-empty-speech-repeat",
+    ttsBudgetMs: budget,
+  });
+  applyMicahVoice(vr, repeatResult);
 
-  let gUrl: string | null = null;
-  let byeUrl: string | null = null;
-  if (supabase) {
-    const goAheadLine = "Go ahead whenever you're ready — I'm listening.";
-    const byeEmptyLine =
-      "I'll let you go for now — feel free to call back anytime. Bye!";
-    [gUrl, byeUrl] = await Promise.all([
-      elevenLabsTtsPublicMp3UrlWithTimeout(
-        supabase,
-        goAheadLine,
-        sid,
-        budget,
-        micahElevenLabsOptsForUtterance(goAheadLine)
-      ),
-      elevenLabsTtsPublicMp3UrlWithTimeout(
-        supabase,
-        byeEmptyLine,
-        sid,
-        budget,
-        micahElevenLabsOptsForUtterance(byeEmptyLine)
-      ),
-    ]);
-  }
+  const goAheadLine = "Go ahead whenever you're ready — I'm listening.";
+  const byeEmptyLine =
+    "I'll let you go for now — feel free to call back anytime. Bye!";
+  const [goAheadResult, byeEmptyResult] = await Promise.all([
+    micahVoice({
+      text: goAheadLine,
+      callSid: sid,
+      supabase,
+      label: "voice-process-empty-gather",
+      ttsBudgetMs: budget,
+    }),
+    micahVoice({
+      text: byeEmptyLine,
+      callSid: sid,
+      supabase,
+      label: "voice-process-empty-bye",
+      ttsBudgetMs: budget,
+    }),
+  ]);
+
   const gather = vr.gather({
     input: ["speech"],
     timeout: 15,
@@ -168,17 +151,9 @@ async function buildEmptySpeechTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  gatherPlayOrFallbackMp3(
-    gather,
-    gUrl,
-    "Go ahead whenever you're ready — I'm listening."
-  );
+  applyMicahVoice(gather, goAheadResult);
 
-  playOrFallbackMp3(
-    vr,
-    byeUrl,
-    "I'll let you go for now — feel free to call back anytime. Bye!"
-  );
+  applyMicahVoice(vr, byeEmptyResult);
   vr.hangup();
   return vr.toString();
 }
@@ -266,19 +241,8 @@ async function handleProcess(request: Request) {
   }
 
   if (!userSpeechRaw) {
-    let missMp3: string | null = null;
     const sidEarly = callSid || `anon-${Date.now()}`;
-    const emptySpeechLine = "Sorry, could you please repeat that?";
-    if (canUseElevenLabsTts(supabase)) {
-      missMp3 = await elevenLabsTtsPublicMp3UrlWithTimeout(
-        supabase,
-        emptySpeechLine,
-        sidEarly,
-        defaultElevenLabsTtsTimeoutMs(),
-        micahElevenLabsOptsForUtterance(emptySpeechLine)
-      );
-    }
-    const twiml = await buildEmptySpeechTwiML(processUrl, supabase, sidEarly, missMp3);
+    const twiml = await buildEmptySpeechTwiML(processUrl, supabase, sidEarly);
     return twimlResponse(twiml, "[micah/voice/process] empty-speech");
   }
 
@@ -287,6 +251,7 @@ async function handleProcess(request: Request) {
   const systemPrompt = buildMicahVoiceSystemPrompt(dialedTo);
   console.log("[Micah-Audit] OpenAI voice chat", {
     model: MODEL,
+    temperature: MICAH_VOICE_CHAT_TEMPERATURE,
     openaiApiKeyMask: maskApiCredential(apiKey),
     keyLooksValid: apiKey.startsWith("sk-"),
     systemPromptChars: systemPrompt.length,
@@ -307,7 +272,7 @@ async function handleProcess(request: Request) {
         },
       ],
       max_tokens: 160,
-      temperature: 0.75,
+      temperature: MICAH_VOICE_CHAT_TEMPERATURE,
     });
     const raw =
       aiResponse.choices[0]?.message?.content?.trim() || aiReply;
@@ -345,56 +310,25 @@ async function handleProcess(request: Request) {
     });
   }
 
-  const notifyTo = process.env.MICAH_VOICE_NOTIFY_EMAIL?.trim();
-  const resendKey = process.env.RESEND_API_KEY?.trim();
-  if (resendKey && notifyTo) {
-    try {
-      const resend = new Resend(resendKey);
-      const fromAddr =
-        process.env.RESEND_FROM?.trim() ??
-        "Micah <leads@directiveos.com.au>";
-      const agencyLabel = getMicahAgencyName();
-      await resend.emails.send({
-        from: fromAddr,
-        to: [notifyTo],
-        subject: `New lead for ${agencyLabel} — Micah voice`,
-        text: [
-          callSid ? `CallSid: ${callSid}` : "CallSid: (none)",
-          from ? `From: ${from}` : "From: (none)",
-          "",
-          "Transcript (caller):",
-          userSpeechRaw,
-          "",
-          "Micah reply:",
-          aiReply,
-          "",
-          `Model: ${MODEL}`,
-          openAiRequestFailed ? "(OpenAI request failed — fallback copy)" : "",
-        ].join("\n"),
-      });
-    } catch (e) {
-      console.warn("[micah/voice/process] Resend skipped:", e);
-    }
+  if (
+    !openAiRequestFailed &&
+    micahReplyLooksLikeLeadWrapUp(aiReply) &&
+    process.env.RESEND_API_KEY?.trim()
+  ) {
+    await sendMicahLeadSummaryEmail({
+      callSid,
+      callerNumber: from,
+      transcriptSnippet: userSpeechRaw.slice(0, 4000),
+      micahReply: aiReply,
+    });
   }
 
-  let replyMp3Url: string | null = null;
-  if (canUseElevenLabsTts(supabase)) {
-    replyMp3Url = await elevenLabsTtsPublicMp3UrlWithTimeout(
-      supabase,
-      aiReply,
-      callSid || `anon-${Date.now()}`,
-      defaultElevenLabsTtsTimeoutMs(),
-      micahElevenLabsOptsForUtterance(aiReply)
-    );
-  }
-
-  console.log("[Micah-Audit] reply synthesis", {
+  console.log("[Micah-Audit] reply synthesis (micahVoice pipeline)", {
     micahVoiceQA: true,
     event: "voice_process_reply_synthesis",
     micahElevenLabsVoiceId: MICAH_ELEVENLABS_VOICE_ID,
     CallSid: callSid || null,
     empathyTuning: textSuggestsEmpatheticTts(aiReply),
-    elevenLabsMp3Url: replyMp3Url,
     openAiRequestFailed,
     replyPreview: aiReply.slice(0, 160),
   });
@@ -404,8 +338,7 @@ async function handleProcess(request: Request) {
       aiReply,
       processUrl,
       supabase,
-      callSid,
-      replyMp3Url
+      callSid
     );
     return twimlResponse(twiml, "[micah/voice/process] ok");
   } catch (e) {
