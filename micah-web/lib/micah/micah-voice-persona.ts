@@ -2,13 +2,6 @@
  * Micah — spoken output uses ElevenLabs only in TwiML (`<Play>`); this file is LLM persona + sanitisation.
  */
 
-import { buildMicahDirectiveGatherSystemPrompt } from "@/lib/micah/micah-directive-os-persona";
-
-/** System prompt for `/api/voice/process` — full locked persona (pass Twilio `To`). */
-export function buildMicahVoiceSystemPrompt(dialedTo?: string): string {
-  return buildMicahDirectiveGatherSystemPrompt(dialedTo);
-}
-
 /** Follow-up text synthesised via ElevenLabs inside `<Gather>` after each AI turn. */
 export const MICAH_GATHER_FOLLOWUP_PROMPT =
   "Is there anything else I can help with?";

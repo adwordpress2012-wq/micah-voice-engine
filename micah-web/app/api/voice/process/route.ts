@@ -15,7 +15,10 @@ import {
   playOrFallbackMp3,
 } from "@/lib/micah/twilio-voice";
 import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
-import { classifyMicahVoiceInbound } from "@/lib/micah/micah-directive-os-persona";
+import {
+  classifyMicahVoiceInbound,
+  getMicahAgencyName,
+} from "@/lib/micah/micah-directive-os-persona";
 import {
   micahElevenLabsOptsForUtterance,
   textSuggestsEmpatheticTts,
@@ -350,10 +353,11 @@ async function handleProcess(request: Request) {
       const fromAddr =
         process.env.RESEND_FROM?.trim() ??
         "Micah <leads@directiveos.com.au>";
+      const agencyLabel = getMicahAgencyName();
       await resend.emails.send({
         from: fromAddr,
         to: [notifyTo],
-        subject: "Micah voice — caller turn",
+        subject: `New lead for ${agencyLabel} — Micah voice`,
         text: [
           callSid ? `CallSid: ${callSid}` : "CallSid: (none)",
           from ? `From: ${from}` : "From: (none)",
