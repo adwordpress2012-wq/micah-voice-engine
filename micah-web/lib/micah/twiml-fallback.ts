@@ -98,6 +98,7 @@ export async function plainErrorTwiMLResponse(
       input: ["speech"],
       timeout: 12,
       speechTimeout: "auto",
+      actionOnEmptyResult: true,
       action: gatherUrl,
       method: "POST",
       language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],

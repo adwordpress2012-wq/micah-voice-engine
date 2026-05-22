@@ -3,7 +3,6 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import twilio from "twilio";
 import { plainErrorTwiMLResponse, twimlResponse } from "@/lib/micah/twiml-fallback";
 import {
-  MICAH_GATHER_FOLLOWUP_PROMPT,
   MICAH_OPENAI_OFFLINE_FALLBACK,
   clampTranscriptForModel,
   sanitizeForMicahSpeech,
@@ -29,7 +28,7 @@ import {
   micahReplyLooksLikeLeadWrapUp,
   sendMicahLeadSummaryEmail,
 } from "@/lib/micah/micah-lead-resend";
-import { applyMicahVoice, micahVoice } from "@/lib/micah/voice-output";
+import { applyMicahVoice, micahVoice, type MicahVoiceResult } from "@/lib/micah/voice-output";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
 import { getTenantIdByInboundNumber } from "@/lib/micah/tenant-config";
@@ -49,6 +48,34 @@ const OPENAI_TIMEOUT_MS = 25_000;
 function formString(form: FormData, key: string): string {
   const v = form.get(key);
   return typeof v === "string" ? v.trim() : "";
+}
+
+const EMPTY_SPEECH_REPEAT_LINE = "Sorry, could you please repeat that?";
+const LISTENING_PROMPT_LINE = "Go ahead whenever you're ready. I'm listening.";
+const REPEAT_MP3_PATH = "/micah-repeat.mp3";
+const LISTENING_MP3_PATH = "/micah-listening.mp3";
+
+function publicAudioUrl(baseUrl: string, path: string): string {
+  return `${new URL(baseUrl).origin}${path}`;
+}
+
+function staticMicahAudio(
+  baseUrl: string,
+  path: string,
+  text: string,
+  label: string,
+  callSid: string
+): MicahVoiceResult {
+  const url = publicAudioUrl(baseUrl, path);
+  console.log(`[micah/voice/process] ${label} static Micah MP3`, {
+    micahVoiceQA: true,
+    event: "voice_process_static_mp3",
+    CallSid: callSid || null,
+    voiceId: MICAH_ELEVENLABS_VOICE_ID,
+    mp3Url: url,
+    textPreview: text.slice(0, 120),
+  });
+  return { kind: "audio", url, text };
 }
 
 /**
@@ -74,25 +101,6 @@ async function buildContinuationTwiML(
   });
   applyMicahVoice(vr, replyResult);
 
-  const followText = `${MICAH_GATHER_FOLLOWUP_PROMPT} I'm listening.`;
-  const byeText = "Thanks for calling — goodbye for now.";
-  const [followResult, byeResult] = await Promise.all([
-    micahVoice({
-      text: followText,
-      callSid: sid,
-      supabase,
-      label: "voice-process-gather-follow",
-      ttsBudgetMs: budget,
-    }),
-    micahVoice({
-      text: byeText,
-      callSid: sid,
-      supabase,
-      label: "voice-process-bye",
-      ttsBudgetMs: budget,
-    }),
-  ]);
-
   const gather = vr.gather({
     input: ["speech"],
     timeout: 15,
@@ -102,10 +110,18 @@ async function buildContinuationTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  applyMicahVoice(gather, followResult);
+  applyMicahVoice(
+    gather,
+    staticMicahAudio(
+      processUrl,
+      LISTENING_MP3_PATH,
+      LISTENING_PROMPT_LINE,
+      "voice-process-gather-follow",
+      sid
+    )
+  );
 
-  applyMicahVoice(vr, byeResult);
-  vr.hangup();
+  vr.redirect({ method: "POST" }, processUrl);
   return vr.toString();
 }
 
@@ -116,37 +132,18 @@ async function buildEmptySpeechTwiML(
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
-  const budget = defaultElevenLabsTtsTimeoutMs();
+  void supabase;
 
-  const repeatLine = "Sorry, could you please repeat that?";
-  const repeatResult = await micahVoice({
-    text: repeatLine,
-    callSid: sid,
-    supabase,
-    label: "voice-process-empty-speech-repeat",
-    ttsBudgetMs: budget,
-  });
-  applyMicahVoice(vr, repeatResult);
-
-  const goAheadLine = "Go ahead whenever you're ready — I'm listening.";
-  const byeEmptyLine =
-    "I'll let you go for now — feel free to call back anytime. Bye!";
-  const [goAheadResult, byeEmptyResult] = await Promise.all([
-    micahVoice({
-      text: goAheadLine,
-      callSid: sid,
-      supabase,
-      label: "voice-process-empty-gather",
-      ttsBudgetMs: budget,
-    }),
-    micahVoice({
-      text: byeEmptyLine,
-      callSid: sid,
-      supabase,
-      label: "voice-process-empty-bye",
-      ttsBudgetMs: budget,
-    }),
-  ]);
+  applyMicahVoice(
+    vr,
+    staticMicahAudio(
+      processUrl,
+      REPEAT_MP3_PATH,
+      EMPTY_SPEECH_REPEAT_LINE,
+      "voice-process-empty-speech-repeat",
+      sid
+    )
+  );
 
   const gather = vr.gather({
     input: ["speech"],
@@ -157,10 +154,18 @@ async function buildEmptySpeechTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  applyMicahVoice(gather, goAheadResult);
+  applyMicahVoice(
+    gather,
+    staticMicahAudio(
+      processUrl,
+      LISTENING_MP3_PATH,
+      LISTENING_PROMPT_LINE,
+      "voice-process-empty-gather",
+      sid
+    )
+  );
 
-  applyMicahVoice(vr, byeEmptyResult);
-  vr.hangup();
+  vr.redirect({ method: "POST" }, processUrl);
   return vr.toString();
 }
 
@@ -318,7 +323,7 @@ async function handleProcess(request: Request) {
   });
 
   const openai = new OpenAI({ apiKey, timeout: OPENAI_TIMEOUT_MS });
-  let aiReply = "Sorry, could you please repeat that?";
+  let aiReply = EMPTY_SPEECH_REPEAT_LINE;
   let openAiRequestFailed = false;
 
   try {
