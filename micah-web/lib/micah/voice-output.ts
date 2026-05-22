@@ -28,6 +28,7 @@ import {
   micahElevenLabsOptsForUtterance,
   textSuggestsEmpatheticTts,
 } from "@/lib/micah/micah-empathy-tts";
+import { buildMicahDirectTtsUrl } from "@/lib/micah/direct-tts-url";
 
 type TwilioVoiceResponse = InstanceType<typeof twilio.twiml.VoiceResponse>;
 type TwilioGather = ReturnType<TwilioVoiceResponse["gather"]>;
@@ -128,6 +129,21 @@ export async function micahVoice(opts: {
       empathyTuning,
       err: e,
     });
+  }
+
+  const directTtsUrl = buildMicahDirectTtsUrl(text);
+  if (directTtsUrl) {
+    console.warn(`[micah/voice] ${label} fallback: direct ElevenLabs <Play> URL`, {
+      micahVoiceQA: true,
+      event: "micah_voice_direct_el_play",
+      micahElevenLabsVoiceId: MICAH_ELEVENLABS_VOICE_ID,
+      callSid,
+      empathyTuning,
+      reason:
+        "Supabase upload path unavailable or timed out; Twilio will fetch a signed app route that streams ElevenLabs Micah audio directly.",
+      utteranceChars: text.length,
+    });
+    return { kind: "audio", url: directTtsUrl, text };
   }
 
   const staticMp3 = process.env.MICAH_FALLBACK_MP3_URL?.trim();
