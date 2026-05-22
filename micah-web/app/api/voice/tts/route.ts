@@ -1,5 +1,3 @@
-import { readFile } from "fs/promises";
-import { join } from "path";
 import { convertTextToSpeech, MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
 import {
   decodeMicahDirectTtsPayload,
@@ -11,15 +9,13 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
-const DIRECT_TTS_FALLBACK_MP3 = join(process.cwd(), "public", "micah-tts-fallback.mp3");
-
-let fallbackAudioCache: Uint8Array | null = null;
-
-async function directTtsFallbackAudio(): Promise<Uint8Array> {
-  if (!fallbackAudioCache) {
-    fallbackAudioCache = new Uint8Array(await readFile(DIRECT_TTS_FALLBACK_MP3));
+async function directTtsFallbackAudio(requestUrl: string): Promise<Uint8Array> {
+  const fallbackUrl = new URL("/micah-tts-fallback.mp3", requestUrl);
+  const response = await fetch(fallbackUrl);
+  if (!response.ok) {
+    throw new Error(`fallback MP3 fetch failed: ${response.status}`);
   }
-  return fallbackAudioCache;
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 export async function GET(request: Request) {
@@ -59,7 +55,7 @@ export async function GET(request: Request) {
       fallbackMp3: "/micah-tts-fallback.mp3",
     });
     try {
-      const audio = await directTtsFallbackAudio();
+      const audio = await directTtsFallbackAudio(request.url);
       return new Response(audio.slice(), {
         status: 200,
         headers: {
