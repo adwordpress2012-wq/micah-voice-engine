@@ -1,4 +1,5 @@
 import { Resend } from "resend";
+import type { ChatTurn } from "@/lib/voice-session";
 
 const LEADS_INBOX = "leads@directiveos.com.au";
 
@@ -12,6 +13,43 @@ export function micahReplyLooksLikeLeadWrapUp(reply: string): boolean {
     r.includes("have someone call you back") ||
     (r.includes("just to confirm") && r.includes("correct"))
   );
+}
+
+function looksLikeBusinessContext(s: string): boolean {
+  const r = s.toLowerCase();
+  return /\b(business|company|clinic|salon|agency|trade|tradie|builder|plumber|electrician|real estate|restaurant|cafe|studio|shop|store|service)\b/.test(
+    r
+  );
+}
+
+function looksLikeNeedContext(s: string): boolean {
+  const r = s.toLowerCase();
+  return /\b(enquiries|inquiries|leads|bookings|booking|website|quote|quotes|chat widget|scw|micah|reception|receptionist|notifications|customers|follow up|automate|automation)\b/.test(
+    r
+  );
+}
+
+export function micahConversationLooksLikeCapturedLead(params: {
+  history: ChatTurn[];
+  callerNumber: string;
+  latestCallerTurn: string;
+  micahReply: string;
+}): boolean {
+  const transcript = [
+    ...params.history.map((m) => m.content),
+    params.latestCallerTurn,
+    params.micahReply,
+  ].join("\n");
+  const hasName = !!guessNameFromTranscript(transcript);
+  const hasPhone =
+    !!params.callerNumber || /\b(?:\+?61|0)[2-478](?:[\s-]?\d){8}\b/.test(transcript);
+  const hasBusiness = looksLikeBusinessContext(transcript);
+  const hasNeed = looksLikeNeedContext(transcript);
+  const micahIsWrapping =
+    micahReplyLooksLikeLeadWrapUp(params.micahReply) ||
+    params.micahReply.toLowerCase().includes("jayson will follow up personally");
+
+  return micahIsWrapping && hasPhone && (hasName || hasBusiness) && hasNeed;
 }
 
 function extractEmailFromText(s: string): string | null {
@@ -46,11 +84,11 @@ export async function sendMicahLeadSummaryEmail(params: {
   callerNumber: string;
   transcriptSnippet: string;
   micahReply: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const apiKey = process.env.RESEND_API_KEY?.trim();
   if (!apiKey) {
     console.warn("[micah-lead-resend] RESEND_API_KEY unset — skip lead summary email");
-    return;
+    return false;
   }
 
   const fromAddr =
@@ -88,7 +126,9 @@ export async function sendMicahLeadSummaryEmail(params: {
       subject: `Micah lead — ${params.callerNumber || params.callSid || "voice call"}`,
       text: body,
     });
+    return true;
   } catch (e) {
     console.warn("[micah-lead-resend] Resend send failed:", e);
+    return false;
   }
 }

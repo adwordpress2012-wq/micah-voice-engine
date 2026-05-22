@@ -20,8 +20,7 @@ function safeTrim(s: string | undefined): string {
 export function micahGatherOpeningSay(): string {
   const custom = safeTrim(process.env.MICAH_GATHER_GREETING);
   if (custom) return custom;
-  const a = getMicahAgencyName();
-  return `G'day! You've reached ${a}, I'm Micah. How can I help you today?`;
+  return "G'day! You've reached DOS Smart Business Assistant, I'm Micah. How can I help you today?";
 }
 
 /** Short line before `<Connect><Stream>` — hear Micah immediately while Realtime links. */

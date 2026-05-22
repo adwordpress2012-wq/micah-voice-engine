@@ -47,7 +47,7 @@ export async function saveTurnToLead(
     tenantId?: string | null;
     openaiVoice?: string | null;
   }
-): Promise<void> {
+): Promise<{ ok: boolean; id?: string; error?: string }> {
   const { callSid, callerId, userText, assistantText, history, tenantId, openaiVoice } =
     params;
 
@@ -75,27 +75,49 @@ export async function saveTurnToLead(
 
   const { data: existing } = await supabase
     .from(TABLE)
-    .select("id")
+    .select("id, metadata")
     .eq("call_sid", callSid)
     .maybeSingle();
 
   if (existing?.id) {
+    const existingMeta =
+      existing.metadata && typeof existing.metadata === "object" && !Array.isArray(existing.metadata)
+        ? (existing.metadata as Record<string, unknown>)
+        : {};
+    const metadata = {
+      ...existingMeta,
+      ...payload.metadata,
+      summary_email_sent: existingMeta.summary_email_sent,
+      command_centre_sent: existingMeta.command_centre_sent,
+    };
     const { error } = await supabase
       .from(TABLE)
       .update({
         phone: callerId,
         tenant_id: payload.tenant_id,
-        metadata: payload.metadata,
+        metadata,
         notes: snippet,
         updated_at: payload.updated_at,
       })
       .eq("id", existing.id);
-    if (error) console.error("Supabase update leads:", error.message);
-  } else {
-    const { error } = await supabase.from(TABLE).insert({
+    if (error) {
+      console.error("Supabase update leads:", error.message);
+      return { ok: false, error: error.message };
+    }
+    return { ok: true, id: String(existing.id) };
+  }
+
+  const { data, error } = await supabase
+    .from(TABLE)
+    .insert({
       ...payload,
       created_at: payload.updated_at,
-    });
-    if (error) console.error("Supabase insert leads:", error.message);
+    })
+    .select("id")
+    .single();
+  if (error) {
+    console.error("Supabase insert leads:", error.message);
+    return { ok: false, error: error.message };
   }
+  return { ok: true, id: typeof data?.id === "string" ? data.id : undefined };
 }

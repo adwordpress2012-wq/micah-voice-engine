@@ -1,5 +1,11 @@
 # Micah web (Next.js — Vercel and/or Fly.io)
 
+**Production Micah Voice path:** use this `micah-web` app with the hardcoded
+ElevenLabs Micah voice ID `4Nz4vG2f9omkfcS8r4PJ`. Do not replace it with
+OpenAI Realtime `cedar` or any other preset voice. The separate
+`micah-realtime-bridge` is experimental only until it can use the official
+Micah ElevenLabs voice or is clearly limited to non-production testing.
+
 ## Twilio must use the production domain
 
 **Preview deployment URLs** (e.g. `micah-voice-engine-git-master-….vercel.app`) are often protected by **Vercel Deployment Protection** and return **401 Unauthorized** to unauthenticated clients. **Twilio cannot post voice webhooks to a 401 URL** — calls will fail or show as offline.
