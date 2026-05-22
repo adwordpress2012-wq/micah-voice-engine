@@ -3,7 +3,9 @@
  * Optional env overrides are trimmed and capped for spoken line length.
  */
 
-import { getMicahAgencyName } from "@/lib/micah/micah-directive-os-persona";
+import { MICAH_DOS_SBA_GREETING_TEXT } from "@/lib/micah/micah-directive-os-persona";
+
+export { MICAH_DOS_SBA_GREETING_TEXT } from "@/lib/micah/micah-directive-os-persona";
 
 const MAX_SAY_CHARS = 500;
 
@@ -12,23 +14,14 @@ function safeTrim(s: string | undefined): string {
   return t.length > 0 ? t.slice(0, MAX_SAY_CHARS) : "";
 }
 
-/**
- * Gather opening inside `<Gather>` — canonical Micah greeting when `MICAH_AGENCY_NAME` is **Directive OS** (default):
- * "G'day! You've reached Directive OS, I'm Micah. How can I help you today?"
- * Override entirely with `MICAH_GATHER_GREETING` if needed.
- */
+/** Gather opening inside `<Gather>` - locked DOS SBA greeting. */
 export function micahGatherOpeningSay(): string {
-  const custom = safeTrim(process.env.MICAH_GATHER_GREETING);
-  if (custom) return custom;
-  return "G'day! You've reached DOS Smart Business Assistant, I'm Micah. How can I help you today?";
+  return MICAH_DOS_SBA_GREETING_TEXT;
 }
 
 /** Short line before `<Connect><Stream>` — hear Micah immediately while Realtime links. */
 export function micahRealtimePreconnectSay(): string {
-  const custom = safeTrim(process.env.MICAH_REALTIME_PRECONNECT_SAY);
-  if (custom) return custom;
-  const a = getMicahAgencyName();
-  return `G'day! You've reached ${a}, I'm Micah — one moment while I connect.`;
+  return MICAH_DOS_SBA_GREETING_TEXT;
 }
 
 /** Gather fallback when gather times out (same as previous hard-coded copy). */

@@ -47,7 +47,7 @@ export async function GET(request: Request) {
     staticAssets: {
       micahFallbackMp3UrlConfigured: hasFallbackMp3,
       micahGreetingMp3UrlConfigured: hasGreetingMp3,
-      bundledGreetingMp3: "/micah-dos-sba-greeting.mp3",
+      bundledGreetingMp3: "/micah-dos-sba-greeting-v2.mp3",
       note: hasFallbackMp3
         ? "MICAH_FALLBACK_MP3_URL is set — EL outages will <Play> this asset (verify it is the Aussie Micah voice)."
         : "MICAH_FALLBACK_MP3_URL is NOT set — EL outages will produce silent <Pause>. Set this env var to a public Aussie Micah MP3 URL.",

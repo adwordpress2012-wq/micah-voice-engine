@@ -6,9 +6,9 @@ import { defaultElevenLabsTtsTimeoutMs } from "@/lib/micah/elevenlabs-tts";
 import { applyMicahVoice, micahVoice } from "@/lib/micah/voice-output";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import {
+  MICAH_DOS_SBA_GREETING_TEXT,
   micahGatherOpeningSay,
   micahGatherTimeoutSay,
-  micahRealtimePreconnectSay,
 } from "@/lib/micah/voice-greetings";
 import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
@@ -21,7 +21,7 @@ const STREAM_WSS = process.env.MICAH_MEDIA_STREAM_WSS_URL?.trim() ?? "";
 const BRIDGE_TOKEN = process.env.MICAH_BRIDGE_SECRET?.trim() ?? "";
 
 const INCOMING_GATHER_TIMEOUT_SEC = 10;
-const DOS_SBA_GREETING_MP3_PATH = "/micah-dos-sba-greeting.mp3";
+const DOS_SBA_GREETING_MP3_PATH = "/micah-dos-sba-greeting-v2.mp3";
 
 function formString(form: FormData, key: string): string {
   const v = form.get(key);
@@ -29,8 +29,6 @@ function formString(form: FormData, key: string): string {
 }
 
 function resolveGreetingMp3Url(request: Request): string {
-  const configured = process.env.MICAH_GREETING_MP3_URL?.trim();
-  if (configured) return configured;
   return `${resolveVoiceActionBaseUrl(request)}${DOS_SBA_GREETING_MP3_PATH}`;
 }
 
@@ -45,12 +43,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const mode =
-    VOICE_ENGINE === "realtime" || VOICE_ENGINE === "openai-realtime"
-      ? "realtime media stream"
-      : "gather → /api/voice/process";
   return new Response(
-    `POST /api/voice/incoming — Micah (${mode}). Opening line via micahVoice (EL or MICAH_GREETING_MP3_URL); follow-up on /api/voice/process.`,
+    "POST /api/voice/incoming - Micah (gather -> /api/voice/process). Opening line is locked to DOS Smart Business Assistant.",
     {
       status: 200,
       headers: { "Content-Type": "text/plain; charset=utf-8" },
@@ -94,8 +88,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const useRealtime =
-      VOICE_ENGINE === "realtime" || VOICE_ENGINE === "openai-realtime";
+    const useRealtime = false;
+    if (VOICE_ENGINE === "realtime" || VOICE_ENGINE === "openai-realtime") {
+      console.warn(
+        "[micah/voice/incoming] MICAH_VOICE_ENGINE realtime ignored; DOS SBA gather path is locked for this route."
+      );
+    }
 
     const sid = callSid || `anon-${Date.now()}`;
     const supabase = getServiceSupabaseOrNull();
@@ -117,7 +115,7 @@ export async function POST(request: NextRequest) {
       const from = formString(form, "From");
       const to = formString(form, "To");
 
-      const preconnect = micahRealtimePreconnectSay();
+      const preconnect = MICAH_DOS_SBA_GREETING_TEXT;
       const staticPre = resolveGreetingMp3Url(request);
 
       const vr = new twilio.twiml.VoiceResponse();
