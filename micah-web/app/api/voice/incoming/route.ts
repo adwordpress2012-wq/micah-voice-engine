@@ -1,14 +1,13 @@
 import twilio from "twilio";
 import type { NextRequest } from "next/server";
 import { plainErrorTwiMLResponse, twimlResponse } from "@/lib/micah/twiml-fallback";
-import { MICAH_SAY_LANGUAGE, playOrFallbackMp3 } from "@/lib/micah/twilio-voice";
+import { MICAH_SAY_LANGUAGE } from "@/lib/micah/twilio-voice";
 import { defaultElevenLabsTtsTimeoutMs } from "@/lib/micah/elevenlabs-tts";
 import { applyMicahVoice, micahVoice } from "@/lib/micah/voice-output";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import {
   MICAH_DOS_SBA_GREETING_TEXT,
   micahGatherOpeningSay,
-  micahGatherTimeoutSay,
 } from "@/lib/micah/voice-greetings";
 import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
@@ -153,7 +152,6 @@ export async function POST(request: NextRequest) {
     console.log("[Micah-Audit] Gather action URL:", processUrl);
 
     const opening = micahGatherOpeningSay();
-    const timeoutLine = micahGatherTimeoutSay();
     const staticGreetingMp3 = resolveGreetingMp3Url(request);
 
     const twiml = new twilio.twiml.VoiceResponse();
@@ -162,6 +160,7 @@ export async function POST(request: NextRequest) {
       input: ["speech"],
       timeout: INCOMING_GATHER_TIMEOUT_SEC,
       speechTimeout: "auto",
+      actionOnEmptyResult: true,
       action: processUrl,
       method: "POST",
       language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
@@ -176,8 +175,7 @@ export async function POST(request: NextRequest) {
     });
     applyMicahVoice(gather, openingResult);
 
-    playOrFallbackMp3(twiml, null, timeoutLine);
-    twiml.hangup();
+    twiml.redirect({ method: "POST" }, processUrl);
 
     console.log(
       "[micah/voice/incoming] <Gather> opening via micahVoice; Aussie Micah EL on /api/voice/process, voiceId=",
