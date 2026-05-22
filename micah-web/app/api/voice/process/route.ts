@@ -17,7 +17,6 @@ import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
 import { classifyMicahVoiceInbound } from "@/lib/micah/micah-directive-os-persona";
 import { textSuggestsEmpatheticTts } from "@/lib/micah/micah-empathy-tts";
 import { maskApiCredential } from "@/lib/micah/mask-api-credential";
-import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import {
   canUseElevenLabsTts,
   defaultElevenLabsTtsTimeoutMs,
@@ -44,6 +43,7 @@ export const dynamic = "force-dynamic";
 const MODEL =
   process.env.OPENAI_CHAT_MODEL?.trim() || MICAH_VOICE_CHAT_MODEL;
 const OPENAI_TIMEOUT_MS = 25_000;
+const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 
 function formString(form: FormData, key: string): string {
   const v = form.get(key);
@@ -56,7 +56,8 @@ const REPEAT_MP3_PATH = "/micah-repeat.mp3";
 const LISTENING_MP3_PATH = "/micah-listening.mp3";
 
 function publicAudioUrl(baseUrl: string, path: string): string {
-  return `${new URL(baseUrl).origin}${path}`;
+  void baseUrl;
+  return `${MICAH_PRODUCTION_VOICE_ORIGIN}${path}`;
 }
 
 function staticMicahAudio(
@@ -180,8 +181,7 @@ export async function GET() {
 }
 
 async function handleProcess(request: Request) {
-  const base = resolveVoiceActionBaseUrl(request);
-  const processUrl = `${base}/api/voice/process`;
+  const processUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/api/voice/process`;
   const gatherOpts = { gatherContinuationUrl: processUrl };
 
   let form: FormData;
@@ -508,8 +508,7 @@ export async function POST(request: Request) {
     return await handleProcess(request);
   } catch (e) {
     console.error("[micah/voice/process] fatal:", e);
-    const base = resolveVoiceActionBaseUrl(request);
-    const processUrl = `${base}/api/voice/process`;
+    const processUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/api/voice/process`;
     return plainErrorTwiMLResponse(
       "",
       "Sorry — please try your call again shortly.",

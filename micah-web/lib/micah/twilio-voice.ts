@@ -20,6 +20,7 @@ import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
 
 /** Speech recognition language for `<Gather>` (STT). NOT a TTS attribute. */
 export const MICAH_SAY_LANGUAGE = "en-AU";
+const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 
 type TwilioVoice = import("twilio/lib/twiml/VoiceResponse");
 type GatherInstance = ReturnType<TwilioVoice["gather"]>;
@@ -27,7 +28,11 @@ type VoiceResponseInstance = InstanceType<typeof twilio.twiml.VoiceResponse>;
 
 /** Single source of truth for the static MP3 fallback URL. */
 function micahFallbackMp3Url(): string | null {
-  return process.env.MICAH_FALLBACK_MP3_URL?.trim() || null;
+  const url = process.env.MICAH_FALLBACK_MP3_URL?.trim();
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith("/")) return `${MICAH_PRODUCTION_VOICE_ORIGIN}${url}`;
+  return null;
 }
 
 function logMicahVoiceQaTwilioVerb(opts: {

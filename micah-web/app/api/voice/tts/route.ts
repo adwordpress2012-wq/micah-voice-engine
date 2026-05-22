@@ -9,8 +9,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
+const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
+
 async function directTtsFallbackAudio(requestUrl: string): Promise<Uint8Array> {
-  const fallbackUrl = new URL("/micah-tts-fallback.mp3", requestUrl);
+  void requestUrl;
+  const fallbackUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/micah-tts-fallback.mp3`;
   const response = await fetch(fallbackUrl);
   if (!response.ok) {
     throw new Error(`fallback MP3 fetch failed: ${response.status}`);

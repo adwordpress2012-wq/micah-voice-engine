@@ -9,7 +9,6 @@ import {
   MICAH_DOS_SBA_GREETING_TEXT,
   micahGatherOpeningSay,
 } from "@/lib/micah/voice-greetings";
-import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
 import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/micah/elevenlabs-tts";
 
@@ -21,14 +20,15 @@ const BRIDGE_TOKEN = process.env.MICAH_BRIDGE_SECRET?.trim() ?? "";
 
 const INCOMING_GATHER_TIMEOUT_SEC = 10;
 const DOS_SBA_GREETING_MP3_PATH = "/micah-dos-sba-greeting-v2.mp3";
+const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 
 function formString(form: FormData, key: string): string {
   const v = form.get(key);
   return typeof v === "string" ? v.trim() : "";
 }
 
-function resolveGreetingMp3Url(request: Request): string {
-  return `${resolveVoiceActionBaseUrl(request)}${DOS_SBA_GREETING_MP3_PATH}`;
+function resolveGreetingMp3Url(): string {
+  return `${MICAH_PRODUCTION_VOICE_ORIGIN}${DOS_SBA_GREETING_MP3_PATH}`;
 }
 
 /**
@@ -52,7 +52,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const gatherContinuationUrl = `${resolveVoiceActionBaseUrl(request)}/api/voice/process`;
+  const gatherContinuationUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/api/voice/process`;
   const gatherOpts = { gatherContinuationUrl };
 
   try {
@@ -115,7 +115,7 @@ export async function POST(request: NextRequest) {
       const to = formString(form, "To");
 
       const preconnect = MICAH_DOS_SBA_GREETING_TEXT;
-      const staticPre = resolveGreetingMp3Url(request);
+      const staticPre = resolveGreetingMp3Url();
 
       const vr = new twilio.twiml.VoiceResponse();
       const preResult = await micahVoice({
@@ -147,12 +147,11 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const base = resolveVoiceActionBaseUrl(request);
-    const processUrl = `${base}/api/voice/process`;
+    const processUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/api/voice/process`;
     console.log("[Micah-Audit] Gather action URL:", processUrl);
 
     const opening = micahGatherOpeningSay();
-    const staticGreetingMp3 = resolveGreetingMp3Url(request);
+    const staticGreetingMp3 = resolveGreetingMp3Url();
 
     const twiml = new twilio.twiml.VoiceResponse();
 
@@ -188,7 +187,7 @@ export async function POST(request: NextRequest) {
     let fatalGather: { gatherContinuationUrl?: string } | undefined;
     try {
       fatalGather = {
-        gatherContinuationUrl: `${resolveVoiceActionBaseUrl(request)}/api/voice/process`,
+        gatherContinuationUrl,
       };
     } catch {
       /* no NEXT_PUBLIC_APP_URL — omit gather */

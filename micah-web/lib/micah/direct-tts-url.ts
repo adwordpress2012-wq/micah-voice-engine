@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { micahElevenLabsOptsForUtterance } from "@/lib/micah/micah-empathy-tts";
 
 const DIRECT_TTS_PATH = "/api/voice/tts";
+const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 
 function directTtsSecret(): string {
   return (
@@ -36,14 +37,13 @@ export function decodeMicahDirectTtsPayload(payload: string): string {
 }
 
 export function buildMicahDirectTtsUrl(text: string): string | null {
-  const base = process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "").trim();
   const plain = text.trim().slice(0, 1200);
-  if (!base || !plain) return null;
+  if (!plain) return null;
 
   const payload = base64Url(plain);
   const sig = signPayload(payload);
   if (!sig) return null;
-  return `${base}${DIRECT_TTS_PATH}?t=${encodeURIComponent(payload)}&sig=${encodeURIComponent(sig)}`;
+  return `${MICAH_PRODUCTION_VOICE_ORIGIN}${DIRECT_TTS_PATH}?t=${encodeURIComponent(payload)}&sig=${encodeURIComponent(sig)}`;
 }
 
 export function micahDirectTtsOpts(text: string) {

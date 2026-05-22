@@ -16,6 +16,7 @@ import {
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 
 type TwilioVR = import("twilio/lib/twiml/VoiceResponse");
+const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 
 export type PlainErrorTwiMLOptions = {
   /**
@@ -66,7 +67,10 @@ export async function plainErrorTwiMLResponse(
     });
     vr.play(url);
   } else {
-    const fallbackMp3 = process.env.MICAH_FALLBACK_MP3_URL?.trim();
+    const configuredFallbackMp3 = process.env.MICAH_FALLBACK_MP3_URL?.trim();
+    const fallbackMp3 = configuredFallbackMp3?.startsWith("/")
+      ? `${MICAH_PRODUCTION_VOICE_ORIGIN}${configuredFallbackMp3}`
+      : configuredFallbackMp3;
     if (fallbackMp3) {
       console.warn(`[${logLabel}] ElevenLabs unavailable — MICAH_FALLBACK_MP3_URL <Play>`, {
         micahVoiceQA: true,
@@ -105,7 +109,7 @@ export async function plainErrorTwiMLResponse(
     });
     gatherPlayOrFallbackMp3(
       gather,
-      null,
+      `${MICAH_PRODUCTION_VOICE_ORIGIN}/micah-listening.mp3`,
       "Go ahead — I'm listening whenever you're ready."
     );
   } else {
