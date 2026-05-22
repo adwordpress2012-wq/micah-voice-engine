@@ -21,10 +21,17 @@ const STREAM_WSS = process.env.MICAH_MEDIA_STREAM_WSS_URL?.trim() ?? "";
 const BRIDGE_TOKEN = process.env.MICAH_BRIDGE_SECRET?.trim() ?? "";
 
 const INCOMING_GATHER_TIMEOUT_SEC = 10;
+const DOS_SBA_GREETING_MP3_PATH = "/micah-dos-sba-greeting.mp3";
 
 function formString(form: FormData, key: string): string {
   const v = form.get(key);
   return typeof v === "string" ? v.trim() : "";
+}
+
+function resolveGreetingMp3Url(request: Request): string {
+  const configured = process.env.MICAH_GREETING_MP3_URL?.trim();
+  if (configured) return configured;
+  return `${resolveVoiceActionBaseUrl(request)}${DOS_SBA_GREETING_MP3_PATH}`;
 }
 
 /**
@@ -111,7 +118,7 @@ export async function POST(request: NextRequest) {
       const to = formString(form, "To");
 
       const preconnect = micahRealtimePreconnectSay();
-      const staticPre = process.env.MICAH_GREETING_MP3_URL?.trim() || null;
+      const staticPre = resolveGreetingMp3Url(request);
 
       const vr = new twilio.twiml.VoiceResponse();
       const preResult = await micahVoice({
@@ -149,7 +156,7 @@ export async function POST(request: NextRequest) {
 
     const opening = micahGatherOpeningSay();
     const timeoutLine = micahGatherTimeoutSay();
-    const staticGreetingMp3 = process.env.MICAH_GREETING_MP3_URL?.trim() || null;
+    const staticGreetingMp3 = resolveGreetingMp3Url(request);
 
     const twiml = new twilio.twiml.VoiceResponse();
 
