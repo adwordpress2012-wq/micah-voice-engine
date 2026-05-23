@@ -10,4 +10,7 @@ dist/
 
 # Cursor / Claude agent worktrees (must not be git submodules — breaks Fly `git submodule` fetch)
 .claude/worktrees/
+.claude/settings.local.json
+micah-web/.claude/settings.local.json
+micah-web/UsersJAYSONAppDataLocalTemp*.json
 .env*.local

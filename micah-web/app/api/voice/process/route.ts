@@ -46,8 +46,11 @@ const OPENAI_TIMEOUT_MS = 8_000;
 const VOICE_PROCESS_TTS_TIMEOUT_MS = 4_000;
 const SUPABASE_CONTEXT_TIMEOUT_MS = 750;
 const SUPABASE_WRITE_TIMEOUT_MS = 750;
+const LEAD_EMAIL_TIMEOUT_MS = 5_000;
 const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 const FOLLOWUP_AUDIO_VERSION = "20260523-no-repeat-greeting";
+const DOS_LEAD_CAPTURE_ACK =
+  "Perfect, I'll pass that to Jayson and he'll follow up personally.";
 
 function formString(form: FormData, key: string): string {
   const v = form.get(key);
@@ -517,6 +520,7 @@ async function handleProcess(request: Request) {
   let history: ChatTurn[] = [];
   let tenantId: string | null = null;
   let leadSummaryEmailSent = false;
+  let existingLeadMetadata: Record<string, unknown> = {};
   if (supabase && callSid) {
     try {
       const context = await withTimeout(
@@ -539,8 +543,15 @@ async function handleProcess(request: Request) {
       history = context.nextHistory;
       tenantId = context.nextTenantId;
       const leadMeta = context.nextLeadMeta;
-      const meta = (leadMeta?.metadata ?? null) as { summary_email_sent?: boolean } | null;
-      leadSummaryEmailSent = meta?.summary_email_sent === true;
+      const meta = (leadMeta?.metadata ?? null) as
+        | { summary_email_sent?: boolean; voice_lead_email_sent?: boolean }
+        | null;
+      existingLeadMetadata =
+        leadMeta?.metadata && typeof leadMeta.metadata === "object" && !Array.isArray(leadMeta.metadata)
+          ? (leadMeta.metadata as Record<string, unknown>)
+          : {};
+      leadSummaryEmailSent =
+        meta?.summary_email_sent === true || meta?.voice_lead_email_sent === true;
     } catch (e) {
       console.warn("[micah/voice/process] lead context lookup skipped:", e);
     }
@@ -621,7 +632,7 @@ async function handleProcess(request: Request) {
 
   const userSpeech = clampTranscriptForModel(userSpeechRaw);
 
-  const systemPrompt = buildMicahVoiceSystemPrompt(dialedTo);
+  const systemPrompt = buildMicahVoiceSystemPrompt(dialedTo, undefined, history, from);
   console.log("[Micah-Audit] OpenAI voice chat", {
     model: MODEL,
     temperature: MICAH_VOICE_CHAT_TEMPERATURE,
@@ -710,6 +721,20 @@ async function handleProcess(request: Request) {
       MICAH_OPENAI_OFFLINE_FALLBACK;
   }
 
+  const capturedLead =
+    !openAiRequestFailed &&
+    (micahReplyLooksLikeLeadWrapUp(aiReply) ||
+      micahConversationLooksLikeCapturedLead({
+        history,
+        callerNumber: from,
+        latestCallerTurn: userSpeechRaw,
+        micahReply: aiReply,
+      }));
+
+  if (capturedLead && !aiReply.includes(DOS_LEAD_CAPTURE_ACK)) {
+    aiReply = DOS_LEAD_CAPTURE_ACK;
+  }
+
   if (supabase) {
     try {
       await withTimeout(
@@ -760,30 +785,27 @@ async function handleProcess(request: Request) {
     });
   }
 
-  const capturedLead =
-    !openAiRequestFailed &&
-    (micahReplyLooksLikeLeadWrapUp(aiReply) ||
-      micahConversationLooksLikeCapturedLead({
-        history,
-        callerNumber: from,
-        latestCallerTurn: userSpeechRaw,
-        micahReply: aiReply,
-      }));
+  const callTurnsForEmail: ChatTurn[] = [
+    ...history.filter((m) => m.role !== "system"),
+    { role: "user", content: userSpeechRaw },
+  ];
 
-  if (capturedLead && !leadSummaryEmailSent && process.env.RESEND_API_KEY?.trim()) {
+  if (capturedLead && !leadSummaryEmailSent) {
     let sent = false;
     try {
       sent = await withTimeout(
         sendMicahLeadSummaryEmail({
           callSid,
           callerNumber: from,
-          transcriptSnippet: [...history, { role: "user" as const, content: userSpeechRaw }]
+          transcriptSnippet: callTurnsForEmail
             .map((m) => `${m.role === "user" ? "Caller" : "Micah"}: ${m.content}`)
             .join("\n")
             .slice(0, 4000),
           micahReply: aiReply,
+          timestamp: new Date().toISOString(),
+          turns: callTurnsForEmail,
         }),
-        SUPABASE_WRITE_TIMEOUT_MS,
+        LEAD_EMAIL_TIMEOUT_MS,
         "lead-summary-email",
         false
       );
@@ -797,6 +819,7 @@ async function handleProcess(request: Request) {
             .from("leads")
             .update({
               metadata: {
+                ...existingLeadMetadata,
                 source: "twilio_voice_turn",
                 messages: [
                   ...history.filter((m) => m.role !== "system"),
@@ -806,6 +829,8 @@ async function handleProcess(request: Request) {
                 tenant_id: tenantId ?? undefined,
                 openai_voice: MICAH_ELEVENLABS_VOICE_ID,
                 summary_email_sent: true,
+                voice_lead_email_sent: true,
+                voice_lead_email_subject: "New Micah Voice Lead - DOS",
               },
             })
             .eq("call_sid", callSid) as unknown as Promise<unknown>,

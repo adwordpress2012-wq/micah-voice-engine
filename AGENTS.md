@@ -61,6 +61,12 @@ Many voice log payloads include **`micahVoiceQA: true`** and an **`event`** stri
 - **Required for ElevenLabs path:** `ELEVENLABS_API_KEY`, `SUPABASE_URL` (or `NEXT_PUBLIC_SUPABASE_URL`), `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_TTS_BUCKET`, `OPENAI_API_KEY` (gather replies).
 - **Static MP3 (optional):** `MICAH_GREETING_MP3_URL`, `MICAH_FALLBACK_MP3_URL` — must be **verified female Aussie Micah** audio only; wrong files bypass EL. In ops, you may record an approved asset hash and compare after uploads.
 
+### Immediate DOS voice lead email
+
+- When enough caller details are captured during `/api/voice/process`, send Resend email immediately; do not wait for call end.
+- Recipient is `MICAH_VOICE_NOTIFY_EMAIL`, falling back to `MICAH_TRANSCRIPT_DEFAULT_TO`. Subject must be `New Micah Voice Lead - DOS`.
+- Resend or Supabase failures must be logged and must not break the voice call.
+
 ### Compliance (invariants)
 
 - ElevenLabs: only **`MICAH_ELEVENLABS_VOICE_ID`** = `4Nz4vG2f9omkfcS8r4PJ` in `micah-web/lib/elevenlabs-tts.ts` — no env override.
@@ -131,6 +137,7 @@ Do not allow any indirect voice logic or accidental overrides in future code or 
 | Sole ElevenLabs voice id constant | `micah-web/lib/elevenlabs-tts.ts` (`MICAH_ELEVENLABS_VOICE_ID`) |
 | EL + Supabase upload | `micah-web/lib/micah/elevenlabs-tts.ts` |
 | TwiML `<Play>`-or-`MICAH_FALLBACK_MP3_URL` helpers (no Polly) | `micah-web/lib/micah/twilio-voice.ts` |
+| Immediate DOS voice lead email | `micah-web/lib/micah/micah-lead-resend.ts` |
 | Voice webhook | `micah-web/app/api/voice/process/route.ts`, `incoming/route.ts` |
 
 When adding features, preserve **persona**, **gender/voice lock**, and the **no-silence** guarantee.

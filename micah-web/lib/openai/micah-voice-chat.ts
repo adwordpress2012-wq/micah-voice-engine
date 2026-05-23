@@ -17,6 +17,11 @@ import {
   type MicahPromptContext,
 } from "@/lib/micah/micah-directive-os-persona";
 import { MICAH_OPENAI_OFFLINE_FALLBACK } from "@/lib/micah/micah-voice-persona";
+import {
+  extractLeadState,
+  buildLeadStatePromptBlock,
+} from "@/lib/micah/micah-lead-state";
+import type { ChatTurn } from "@/lib/voice-session";
 
 export type { MicahPromptContext } from "@/lib/micah/micah-directive-os-persona";
 export { MICAH_OPENAI_OFFLINE_FALLBACK } from "@/lib/micah/micah-voice-persona";
@@ -42,17 +47,31 @@ The DOS Smart Business Assistant opening greeting has already been played by Twi
 `.trim();
 
 /**
- * Full system prompt for `/api/voice/process` — **Micah v3 Modular Persona** plus Jayson override.
- * Pass {@link MicahPromptContext} to override env-driven agency / service area / principal for multi-tenant demos.
+ * Full system prompt for `/api/voice/process` — **Micah v3 Modular Persona** plus Jayson override
+ * and a dynamic lead-state block so Micah can answer clarification questions like
+ * "what details do you need?" with only what is actually still missing.
  */
 export function buildMicahVoiceSystemPrompt(
   dialedTo?: string,
-  ctx?: MicahPromptContext
+  ctx?: MicahPromptContext,
+  history?: ChatTurn[],
+  callerNumber?: string
 ): string {
   const agency = ctx?.agencyName?.trim() || getMicahAgencyName();
   const modular = buildMicahDirectiveGatherSystemPrompt(dialedTo, ctx);
   const jaysonLayer = JAYSON_OCAMPO_HEALTH_OVERRIDE.replaceAll("[AGENCY_NAME]", agency);
-  return `${modular}\n\n${NO_REPEAT_GREETING_OVERRIDE}\n\n${jaysonLayer}`;
+
+  const parts = [modular, NO_REPEAT_GREETING_OVERRIDE, jaysonLayer];
+
+  if (history && history.length > 0) {
+    const state = extractLeadState(history, callerNumber);
+    const stateBlock = buildLeadStatePromptBlock(state, callerNumber);
+    if (stateBlock) {
+      parts.push(stateBlock);
+    }
+  }
+
+  return parts.join("\n\n");
 }
 
 /** Safe for `/api/voice/diagnostic` and structured logs — never returns the raw key. */
