@@ -58,6 +58,11 @@ const EMPTY_SPEECH_REPEAT_LINE = "Sorry, could you please repeat that?";
 const EMPTY_SPEECH_GOODBYE_LINE =
   "No worries, Jayson can follow up if you need help. Thanks for calling DOS.";
 const MAX_EMPTY_SPEECH_REPEATS = 2;
+// Lead-capture specific silence fallbacks — used after Micah has asked for caller details.
+const LEAD_CAPTURE_REPEAT_LINE =
+  "No worries — can I grab your name, business name, and best contact number?";
+const LEAD_CAPTURE_GOODBYE_LINE =
+  "That's okay. You can call back anytime, or Jayson can follow up if we already have your number. Thanks for calling DOS.";
 const DOS_STATIC_ANSWER_LINE =
   "DOS helps small businesses get more enquiries, capture leads, automate customer communication, and improve bookings. It's designed to make things easier for businesses like yours.";
 const WEBSITES_STATIC_ANSWER_LINE =
@@ -74,9 +79,15 @@ function publicAudioUrl(baseUrl: string, path: string): string {
   return `${MICAH_PRODUCTION_VOICE_ORIGIN}${path}?v=${FOLLOWUP_AUDIO_VERSION}`;
 }
 
-function processUrlWithEmptySpeechCount(processUrl: string, count: number): string {
-  const url = new URL(processUrl);
-  url.searchParams.set("emptySpeechCount", String(count));
+function buildProcessUrl(
+  base: string,
+  opts: { leadCapture?: boolean; emptySpeechCount?: number }
+): string {
+  const url = new URL(base);
+  if (opts.leadCapture) url.searchParams.set("leadCapture", "1");
+  if (opts.emptySpeechCount && opts.emptySpeechCount > 0) {
+    url.searchParams.set("emptySpeechCount", String(opts.emptySpeechCount));
+  }
   return url.toString();
 }
 
@@ -84,6 +95,19 @@ function parseEmptySpeechCount(request: Request): number {
   const raw = new URL(request.url).searchParams.get("emptySpeechCount");
   const parsed = raw ? Number.parseInt(raw, 10) : 0;
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, MAX_EMPTY_SPEECH_REPEATS) : 0;
+}
+
+function parseLeadCapture(request: Request): boolean {
+  return new URL(request.url).searchParams.get("leadCapture") === "1";
+}
+
+function replyIsLeadCaptureAsk(reply: string): boolean {
+  const lower = reply.toLowerCase();
+  return (
+    /(can i|could i|let me|may i).{0,50}(grab|get|take|jot).{0,40}(name|number|details)/.test(lower) ||
+    /(your name|business name|contact number|phone number|best number)/.test(lower) ||
+    /(take.{0,20}details|pass.{0,20}details|jot.{0,20}down)/.test(lower)
+  );
 }
 
 type DemoStaticAnswer = {
@@ -223,7 +247,8 @@ async function buildContinuationTwiML(
   aiReply: string,
   processUrl: string,
   supabase: SupabaseClient | null,
-  callSid: string
+  callSid: string,
+  alreadyInLeadCapture: boolean = false
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
@@ -240,17 +265,21 @@ async function buildContinuationTwiML(
   });
   applyMicahVoice(vr, replyResult);
 
+  // Propagate lead-capture context so silence after this turn uses the right fallback messages.
+  const inLeadCapture = alreadyInLeadCapture || replyIsLeadCaptureAsk(aiReply);
+  const gatherUrl = buildProcessUrl(processUrl, { leadCapture: inLeadCapture });
+
   vr.gather({
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
     actionOnEmptyResult: true,
-    action: processUrl,
+    action: gatherUrl,
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
 
-  vr.redirect({ method: "POST" }, processUrl);
+  vr.redirect({ method: "POST" }, gatherUrl);
   return vr.toString();
 }
 
@@ -258,14 +287,16 @@ async function buildEmptySpeechTwiML(
   processUrl: string,
   supabase: SupabaseClient | null,
   callSid: string,
-  emptySpeechCount: number
+  emptySpeechCount: number,
+  inLeadCapture: boolean
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
 
   if (emptySpeechCount >= MAX_EMPTY_SPEECH_REPEATS) {
+    const goodbyeText = inLeadCapture ? LEAD_CAPTURE_GOODBYE_LINE : EMPTY_SPEECH_GOODBYE_LINE;
     const goodbyeResult = await micahVoice({
-      text: EMPTY_SPEECH_GOODBYE_LINE,
+      text: goodbyeText,
       callSid: sid,
       supabase,
       label: "voice-process-empty-speech-goodbye",
@@ -278,28 +309,47 @@ async function buildEmptySpeechTwiML(
     return vr.toString();
   }
 
-  applyMicahVoice(
-    vr,
-    staticMicahAudio(
-      processUrl,
-      REPEAT_MP3_PATH,
-      EMPTY_SPEECH_REPEAT_LINE,
-      "voice-process-empty-speech-repeat",
-      sid
-    )
-  );
+  if (inLeadCapture) {
+    // Lead-capture silence: use TTS so the caller hears the exact prompt, not the generic repeat MP3.
+    const repeatResult = await micahVoice({
+      text: LEAD_CAPTURE_REPEAT_LINE,
+      callSid: sid,
+      supabase,
+      label: "voice-process-lead-capture-repeat",
+      ttsBudgetMs: Math.max(defaultElevenLabsTtsTimeoutMs(), VOICE_PROCESS_TTS_TIMEOUT_MS),
+      allowDirectTtsFallback: true,
+      allowStaticMp3Fallback: true,
+    });
+    applyMicahVoice(vr, repeatResult);
+  } else {
+    applyMicahVoice(
+      vr,
+      staticMicahAudio(
+        processUrl,
+        REPEAT_MP3_PATH,
+        EMPTY_SPEECH_REPEAT_LINE,
+        "voice-process-empty-speech-repeat",
+        sid
+      )
+    );
+  }
+
+  const nextUrl = buildProcessUrl(processUrl, {
+    leadCapture: inLeadCapture,
+    emptySpeechCount: emptySpeechCount + 1,
+  });
 
   vr.gather({
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
     actionOnEmptyResult: true,
-    action: processUrlWithEmptySpeechCount(processUrl, emptySpeechCount + 1),
+    action: nextUrl,
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
 
-  vr.redirect({ method: "POST" }, processUrlWithEmptySpeechCount(processUrl, emptySpeechCount + 1));
+  vr.redirect({ method: "POST" }, nextUrl);
   return vr.toString();
 }
 
@@ -403,6 +453,7 @@ export async function GET() {
 async function handleProcess(request: Request) {
   const processUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/api/voice/process`;
   const emptySpeechCount = parseEmptySpeechCount(request);
+  const inLeadCapture = parseLeadCapture(request);
   console.log("[micah/voice/process] incoming request", twilioRequestLogContext(request));
 
   let form: FormData;
@@ -543,7 +594,7 @@ async function handleProcess(request: Request) {
       }
     );
     const sidEarly = callSid || `anon-${Date.now()}`;
-    const twiml = await buildEmptySpeechTwiML(processUrl, supabase, sidEarly, emptySpeechCount);
+    const twiml = await buildEmptySpeechTwiML(processUrl, supabase, sidEarly, emptySpeechCount, inLeadCapture);
     return twimlResponse(twiml, "[micah/voice/process] empty-speech");
   }
 
@@ -573,7 +624,8 @@ async function handleProcess(request: Request) {
       aiReply || MICAH_OPENAI_OFFLINE_FALLBACK,
       processUrl,
       supabase,
-      callSid
+      callSid,
+      inLeadCapture
     );
     return twimlResponse(twiml, "[micah/voice/process] no-openai-offline-fallback");
   }
@@ -793,7 +845,8 @@ async function handleProcess(request: Request) {
       aiReply,
       processUrl,
       supabase,
-      callSid
+      callSid,
+      inLeadCapture
     );
     return twimlResponse(twiml, "[micah/voice/process] ok");
   } catch (e) {
