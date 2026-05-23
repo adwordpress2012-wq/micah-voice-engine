@@ -134,9 +134,28 @@ type CallbackIntentDetection = {
 };
 
 const CALLBACK_TARGET_PATTERN =
-  "(?:you\\s+guys|the\\s+owner|the\\s+team|jayson|jason|jase|jay|someone|somebody|anyone|owner|team|you|[a-z][a-z'-]{1,30})";
+  "(?:you\\s+guys|the\\s+owner|the\\s+team|jayson|jason|jase|jay|json|chasen|chason|jace|someone|somebody|anyone|owner|team|you|[a-z][a-z'-]{1,30})";
 const CALLBACK_VERB_PATTERN =
-  "(?:call(?:\\s+back)?|ring|contact|phone|get\\s+back\\s+to\\s+me|follow\\s+up)";
+  "(?:call(?:\\s+back)?|ring|contact|phone|speak|get\\s+back\\s+to\\s+me|follow\\s+up)";
+
+// ---------------------------------------------------------------------------
+// Tolerant token-presence detection — fires when ANY Jayson-alias co-occurs
+// with ANY callback verb/phrase regardless of sentence structure.
+// STT commonly renders "Jayson/Jason" as "json", "chasen", "jase", etc.
+// ---------------------------------------------------------------------------
+const TOLERANT_JAYSON_TOKENS = new Set<string>([
+  "jayson", "jason", "jase", "jay", "json", "chasen", "chason", "jace",
+]);
+const TOLERANT_PERSON_PHRASES = [
+  "someone", "somebody", "anyone", "you guys", "the owner", "owner", "the team", "team",
+];
+const TOLERANT_VERB_TOKENS = new Set<string>([
+  "call", "ring", "contact", "phone", "speak", "callback",
+]);
+const TOLERANT_VERB_PHRASES = [
+  "call back", "call me", "call us", "ring me", "ring us",
+  "get back to me", "get back to us", "follow up", "phone me", "phone us",
+];
 
 function editDistanceAtMostOne(a: string, b: string): boolean {
   if (Math.abs(a.length - b.length) > 1) return false;
@@ -165,18 +184,26 @@ function editDistanceAtMostOne(a: string, b: string): boolean {
 
 function isJaysonAliasToken(token: string): boolean {
   const t = token.toLowerCase();
-  const likelyJaysonPrefix = /^(jay|jas|jae)/.test(t);
+  // Exact aliases — includes common STT misheards: "json" for "Jason/Jayson",
+  // "chasen"/"chason" for "Jason", "jace" as a known nickname.
+  if (TOLERANT_JAYSON_TOKENS.has(t)) return true;
+  const likelyJaysonPrefix = /^(jay|jas|jae|cha)/.test(t);
   return (
-    ["jayson", "jason", "jase", "jay"].includes(t) ||
-    (likelyJaysonPrefix &&
-      t.length >= 5 &&
-      (editDistanceAtMostOne(t, "jayson") || editDistanceAtMostOne(t, "jason")))
+    likelyJaysonPrefix &&
+    t.length >= 4 &&
+    (editDistanceAtMostOne(t, "jayson") || editDistanceAtMostOne(t, "jason"))
   );
 }
 
 function normaliseCallbackSpeechForIntent(userSpeech: string): string {
   let speech = normaliseSpeechForIntent(userSpeech);
   speech = speech
+    // STT misheards for Jayson/Jason
+    .replace(/\bjson\b/g, "jayson")
+    .replace(/\bchasen\b/g, "jayson")
+    .replace(/\bchason\b/g, "jayson")
+    .replace(/\bjace\b/g, "jayson")
+    // Person aliases → jayson
     .replace(/\byou guys\b/g, "jayson")
     .replace(/\bthe owner\b/g, "jayson")
     .replace(/\bowner\b/g, "jayson")
@@ -299,6 +326,37 @@ function detectCallbackIntent(userSpeech: string): CallbackIntentDetection {
       normalizedSpeech,
       detectedName: callbackTargetName(rule.targetGroup ? match[rule.targetGroup] : null),
       matchedRule: rule.name,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tolerant fallback — fires when regex rules miss due to unusual STT output
+  // (e.g. "json" for "Jason", "chasen" for "Jason", exotic sentence order).
+  // Pure token-presence: ANY Jayson-alias + ANY callback verb → detected.
+  // ---------------------------------------------------------------------------
+  const tokens = new Set(speech.split(/\s+/));
+  const tolerantPersonMatch =
+    TOLERANT_PERSON_PHRASES.some((p) => speech.includes(p)) ||
+    [...tokens].some((t) => TOLERANT_JAYSON_TOKENS.has(t));
+  const tolerantVerbMatch =
+    TOLERANT_VERB_PHRASES.some((p) => speech.includes(p)) ||
+    [...tokens].some((t) => TOLERANT_VERB_TOKENS.has(t));
+
+  if (tolerantPersonMatch && tolerantVerbMatch) {
+    return {
+      detected: true,
+      normalizedSpeech,
+      detectedName: DEFAULT_CALLBACK_TARGET_NAME,
+      matchedRule: "tolerant_token_presence",
+    };
+  }
+  // "call me back" / "call us back" with no explicit person — still a callback
+  if (TOLERANT_VERB_PHRASES.some((p) => speech.includes(p))) {
+    return {
+      detected: true,
+      normalizedSpeech,
+      detectedName: DEFAULT_CALLBACK_TARGET_NAME,
+      matchedRule: "tolerant_call_back_phrase",
     };
   }
 
@@ -1043,6 +1101,32 @@ async function handleProcess(request: Request) {
   });
 
   const initialCallbackIntent = userSpeechRaw ? detectCallbackIntent(userSpeechRaw) : null;
+
+  // ── ALWAYS-ON PRODUCTION DIAGNOSTIC ──────────────────────────────────────
+  // Fires on EVERY request — whether detection passes or fails — so we can
+  // inspect raw + normalized speech and the exact rule result in Vercel logs.
+  // Search logs for event:"CALLBACK_DETECTION_DIAG" to see this.
+  console.warn("[micah/voice/process] CALLBACK_DETECTION_DIAG", {
+    micahVoiceQA: true,
+    event: "CALLBACK_DETECTION_DIAG",
+    CallSid: callSid || null,
+    From: from || null,
+    rawSpeech: userSpeechRaw || null,
+    rawSpeechLen: userSpeechRaw?.length ?? 0,
+    normalizedSpeech: initialCallbackIntent?.normalizedSpeech ?? null,
+    callbackIntentDetected: initialCallbackIntent?.detected ?? false,
+    matchedRule: initialCallbackIntent?.matchedRule ?? null,
+    detectedName: initialCallbackIntent?.detectedName ?? null,
+    inCallbackMode,
+    inLeadCapture,
+    twimlBranch: initialCallbackIntent?.detected
+      ? "callback-fast-path"
+      : !userSpeechRaw
+        ? "empty-speech"
+        : "demo-or-openai",
+  });
+  // ─────────────────────────────────────────────────────────────────────────
+
   if (initialCallbackIntent?.detected) {
     const callbackReply = callbackFastPathReplyForName(initialCallbackIntent.detectedName);
     console.warn("[micah/voice/process] callback_intent_detected", {
