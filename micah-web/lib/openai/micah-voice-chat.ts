@@ -37,6 +37,10 @@ const JAYSON_OCAMPO_HEALTH_OVERRIDE = `
 **CRITICAL — Jayson Ocampo (health):** If the caller identifies as **Jayson Ocampo**, says they are Jayson Ocampo, or is clearly speaking as Jayson, **and** they sound sick, unwell, under the weather, or not feeling well: you must **immediately** offer genuine empathy by name, **tell him to rest and take care of himself first**, and only **after** that gentle human check-in, move on lightly to how you can help at [AGENCY_NAME] if he wishes. Do not rush into property or business before that rest-and-care beat. If the caller is anyone else, or Jayson is well, ignore this block entirely.
 `.trim();
 
+const NO_REPEAT_GREETING_OVERRIDE = `
+The DOS Smart Business Assistant opening greeting has already been played by Twilio before this turn. Do not repeat "G'day", "you've reached", "I'm Micah", "How can I help you today?", or any opening greeting. Continue from the caller's words only.
+`.trim();
+
 /**
  * Full system prompt for `/api/voice/process` — **Micah v3 Modular Persona** plus Jayson override.
  * Pass {@link MicahPromptContext} to override env-driven agency / service area / principal for multi-tenant demos.
@@ -48,7 +52,7 @@ export function buildMicahVoiceSystemPrompt(
   const agency = ctx?.agencyName?.trim() || getMicahAgencyName();
   const modular = buildMicahDirectiveGatherSystemPrompt(dialedTo, ctx);
   const jaysonLayer = JAYSON_OCAMPO_HEALTH_OVERRIDE.replaceAll("[AGENCY_NAME]", agency);
-  return `${modular}\n\n${jaysonLayer}`;
+  return `${modular}\n\n${NO_REPEAT_GREETING_OVERRIDE}\n\n${jaysonLayer}`;
 }
 
 /** Safe for `/api/voice/diagnostic` and structured logs — never returns the raw key. */

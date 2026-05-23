@@ -54,7 +54,7 @@ function formString(form: FormData, key: string): string {
 }
 
 const EMPTY_SPEECH_REPEAT_LINE = "Sorry, could you please repeat that?";
-const LISTENING_PROMPT_LINE = "Go ahead whenever you're ready. I'm listening.";
+const LISTENING_PROMPT_LINE = "I'm listening.";
 const REPEAT_MP3_PATH = "/micah-repeat.mp3";
 const LISTENING_MP3_PATH = "/micah-listening.mp3";
 
@@ -151,6 +151,7 @@ async function buildContinuationTwiML(
     label: "voice-process-reply",
     ttsBudgetMs: budget,
     allowDirectTtsFallback: false,
+    allowStaticMp3Fallback: false,
   });
   applyMicahVoice(vr, replyResult);
 

@@ -57,6 +57,8 @@ export async function micahVoice(opts: {
   preferredPlayUrl?: string | null;
   /** Disable the signed `/api/voice/tts` fallback when Twilio needs fully immediate/static TwiML. */
   allowDirectTtsFallback?: boolean;
+  /** Disable `MICAH_FALLBACK_MP3_URL` when that global asset is unsafe for a specific call phase. */
+  allowStaticMp3Fallback?: boolean;
   /**
    * When set, ElevenLabs+upload is aborted after this many ms (then static MP3 / silent).
    * Omit for full synthesis (e.g. `/api/voice/process`).
@@ -71,6 +73,7 @@ export async function micahVoice(opts: {
     preferredPlayUrl,
     ttsBudgetMs,
     allowDirectTtsFallback = true,
+    allowStaticMp3Fallback = true,
   } = opts;
 
   const preferred = preferredPlayUrl?.trim();
@@ -156,7 +159,9 @@ export async function micahVoice(opts: {
     return { kind: "audio", url: directTtsUrl, text };
   }
 
-  const staticMp3 = process.env.MICAH_FALLBACK_MP3_URL?.trim();
+  const staticMp3 = allowStaticMp3Fallback
+    ? process.env.MICAH_FALLBACK_MP3_URL?.trim()
+    : "";
   if (staticMp3) {
     console.warn(`[micah/voice] ${label} fallback: MICAH_FALLBACK_MP3_URL <Play>`, {
       micahVoiceQA: true,
