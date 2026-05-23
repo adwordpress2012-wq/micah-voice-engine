@@ -10,7 +10,8 @@ export const MICAH_GATHER_FOLLOWUP_PROMPT =
  * When OpenAI chat is unavailable, callers still hear Micah stay in character.
  * This must never be an opening greeting because Twilio has already played the DOS greeting.
  */
-export const MICAH_OPENAI_OFFLINE_FALLBACK = "I'm listening.";
+export const MICAH_OPENAI_OFFLINE_FALLBACK =
+  "Sorry, I'm having trouble getting that answer through. Could you ask that once more?";
 
 /** Plain sentences for ElevenLabs / Twilio (no markdown). */
 export function sanitizeForMicahSpeech(raw: string): string {

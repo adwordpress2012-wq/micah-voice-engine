@@ -43,7 +43,7 @@ export const dynamic = "force-dynamic";
 const MODEL =
   process.env.OPENAI_CHAT_MODEL?.trim() || MICAH_VOICE_CHAT_MODEL;
 const OPENAI_TIMEOUT_MS = 8_000;
-const VOICE_PROCESS_TTS_TIMEOUT_MS = 1_500;
+const VOICE_PROCESS_TTS_TIMEOUT_MS = 4_000;
 const SUPABASE_CONTEXT_TIMEOUT_MS = 750;
 const SUPABASE_WRITE_TIMEOUT_MS = 750;
 const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
@@ -56,6 +56,8 @@ function formString(form: FormData, key: string): string {
 
 const EMPTY_SPEECH_REPEAT_LINE = "Sorry, could you please repeat that?";
 const LISTENING_PROMPT_LINE = "I'm listening.";
+const DOS_STATIC_ANSWER_LINE =
+  "DOS helps small businesses get more enquiries, capture leads, automate customer communication, and improve bookings.";
 const REPEAT_MP3_PATH = "/micah-repeat.mp3";
 const LISTENING_MP3_PATH = "/micah-listening.mp3";
 
@@ -131,6 +133,13 @@ function staticMicahAudio(
   return { kind: "audio", url, text };
 }
 
+function fallbackReplyForRecognisedSpeech(userSpeech: string): string {
+  if (/\b(dos|directive\s*os)\b/i.test(userSpeech)) {
+    return DOS_STATIC_ANSWER_LINE;
+  }
+  return MICAH_OPENAI_OFFLINE_FALLBACK;
+}
+
 /**
  * TwiML for Micah's reply then `<Gather>` — all playable lines go through {@link micahVoice} /
  * {@link applyMicahVoice} (Aussie Micah ElevenLabs or approved MP3 fallback; `<Gather>` preserved).
@@ -143,7 +152,7 @@ async function buildContinuationTwiML(
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
-  const budget = Math.min(defaultElevenLabsTtsTimeoutMs(), VOICE_PROCESS_TTS_TIMEOUT_MS);
+  const budget = Math.max(defaultElevenLabsTtsTimeoutMs(), VOICE_PROCESS_TTS_TIMEOUT_MS);
 
   const replyResult = await micahVoice({
     text: aiReply,
@@ -151,8 +160,8 @@ async function buildContinuationTwiML(
     supabase,
     label: "voice-process-reply",
     ttsBudgetMs: budget,
-    allowDirectTtsFallback: false,
-    allowStaticMp3Fallback: false,
+    allowDirectTtsFallback: true,
+    allowStaticMp3Fallback: true,
   });
   applyMicahVoice(vr, replyResult);
 
@@ -537,7 +546,7 @@ async function handleProcess(request: Request) {
         { micahVoiceQA: true, event: "voice_process_openai_empty_content", finishReason }
       );
       aiReply =
-        sanitizeForMicahSpeech(MICAH_OPENAI_OFFLINE_FALLBACK) ||
+        sanitizeForMicahSpeech(fallbackReplyForRecognisedSpeech(userSpeechRaw)) ||
         MICAH_OPENAI_OFFLINE_FALLBACK;
     } else {
       aiReply = sanitizeForMicahSpeech(rawContent.trim()) || aiReply;
@@ -553,7 +562,7 @@ async function handleProcess(request: Request) {
       stack: err?.stack?.split("\n").slice(0, 4).join(" | "),
     });
     aiReply =
-      sanitizeForMicahSpeech(MICAH_OPENAI_OFFLINE_FALLBACK) ||
+      sanitizeForMicahSpeech(fallbackReplyForRecognisedSpeech(userSpeechRaw)) ||
       MICAH_OPENAI_OFFLINE_FALLBACK;
   }
 
