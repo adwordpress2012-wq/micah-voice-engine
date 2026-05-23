@@ -1,5 +1,9 @@
 import { Resend } from "resend";
 import type { ChatTurn } from "@/lib/voice-session";
+import {
+  resolveResendApiKey,
+  resolveResendFromAddress,
+} from "@/lib/micah/resend-config";
 
 export async function sendCallSummaryEmail(params: {
   to: string;
@@ -8,8 +12,8 @@ export async function sendCallSummaryEmail(params: {
   tenantLabel?: string;
   messages: ChatTurn[];
 }): Promise<{ ok: boolean; error?: string }> {
-  const apiKey = process.env.RESEND_API_KEY;
-  const fromAddress = process.env.RESEND_FROM;
+  const apiKey = resolveResendApiKey();
+  const fromAddress = resolveResendFromAddress();
   if (!apiKey || !fromAddress) {
     console.warn("sendCallSummaryEmail: missing RESEND_API_KEY or RESEND_FROM");
     return { ok: false, error: "Resend not configured" };

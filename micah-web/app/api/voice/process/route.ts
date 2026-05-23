@@ -1,6 +1,4 @@
 import OpenAI from "openai";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import twilio from "twilio";
 import { twimlResponse } from "@/lib/micah/twiml-fallback";
@@ -27,7 +25,9 @@ import {
 import {
   micahConversationLooksLikeCapturedLead,
   micahReplyLooksLikeLeadWrapUp,
+  scheduleEarlyCallbackLeadEmail,
   sendMicahLeadSummaryEmail,
+  type MicahLeadEmailTier,
 } from "@/lib/micah/micah-lead-resend";
 import { extractLeadState } from "@/lib/micah/micah-lead-state";
 import { maskEmailAddress, resolveLeadRecipient } from "@/lib/micah/resend-config";
@@ -56,10 +56,13 @@ const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 const FOLLOWUP_AUDIO_VERSION = "20260523-no-repeat-greeting";
 const DOS_LEAD_CAPTURE_ACK =
   "Perfect, I'll pass that to Jayson and he'll follow up personally.";
+const DEFAULT_CALLBACK_TARGET_NAME = "Jayson";
 const CALLBACK_DETAILS_ASK =
   "Can I grab your name, mobile number, and email address?";
-const CALLBACK_FAST_PATH_REPLY =
-  "Sure, I'll let Jayson know to call you back as soon as possible. Can I grab your name, mobile number, and email address?";
+function callbackFastPathReplyForName(targetName: string): string {
+  return `Sure, I'll let ${targetName} know to call you back as soon as possible. ${CALLBACK_DETAILS_ASK}`;
+}
+const CALLBACK_FAST_PATH_REPLY = callbackFastPathReplyForName(DEFAULT_CALLBACK_TARGET_NAME);
 const CALLBACK_ONLY_PHONE_REPLY =
   "Perfect, thanks. What's your name and email address?";
 const CALLBACK_ONLY_NAME_REPLY =
@@ -90,9 +93,6 @@ const PRICING_STATIC_ANSWER_LINE =
 const DOS_DEMO_ANSWER_MP3_PATH = "/micah-demo-dos-answer.mp3";
 const WEBSITES_DEMO_ANSWER_MP3_PATH = "/micah-demo-websites-answer.mp3";
 const PRICING_DEMO_ANSWER_MP3_PATH = "/micah-demo-pricing-answer.mp3";
-const CALLBACK_REQUEST_MP3_PATH = "/micah-callback-request.mp3";
-const CALLBACK_REQUEST_MP3_URL = `${MICAH_PRODUCTION_VOICE_ORIGIN}${CALLBACK_REQUEST_MP3_PATH}`;
-const CALLBACK_REQUEST_MP3_FILE = join(process.cwd(), "public", CALLBACK_REQUEST_MP3_PATH.slice(1));
 
 function publicAudioUrl(baseUrl: string, path: string): string {
   void baseUrl;
@@ -126,33 +126,180 @@ function parseCallbackMode(request: Request): boolean {
   return new URL(request.url).searchParams.get("callbackMode") === "1";
 }
 
-/**
- * Detects whether the caller is requesting a callback or transfer.
- * Returns the detected person's name (defaults to "Jayson") so Micah can
- * personalise the reply: "Sure, I'll let Paul know to call you back..."
- */
-function detectCallbackIntent(speech: string): { detected: boolean; requestedPerson: string } {
-  const detected =
-    /\b(?:can|could)\s+(?:jayson|someone|[a-z]+)\s+(?:call|ring|contact)\s+(?:me|us)\b/i.test(speech) ||
-    /\bcan you (?:get|have|ask)\s+(?:jayson|[a-z]+)\s+to\s+(?:call|ring|contact)\b/i.test(speech) ||
-    /\b(?:can|could)\s+(?:i|we)\s+(?:speak|talk|chat)\s+(?:to|with)\s+(?:jayson|[a-z]+)\b/i.test(speech) ||
-    /\bhappy to stay on the line\b/i.test(speech) ||
-    /\bcall (?:me|us) back\b/i.test(speech) ||
-    /\bcan you call (?:me|us)\b/i.test(speech) ||
-    /\bsomeone (?:call|ring|contact)\s+(?:me|us)\b/i.test(speech) ||
-    /\bget (?:me|us) (?:a callback|a call|called)\b/i.test(speech) ||
-    /\bcan (?:i|we) get a (?:call|callback|ring)\b/i.test(speech);
+type CallbackIntentDetection = {
+  detected: boolean;
+  normalizedSpeech: string;
+  detectedName: string;
+  matchedRule: string | null;
+};
 
-  // Extract a specific person's name if mentioned (e.g. "Can Paul call me back?")
-  let requestedPerson = "Jayson";
-  const personMatch = speech.match(
-    /\b(?:can|could|get|have|ask)\s+([A-Z][a-z]+)\s+(?:call|ring|contact)\s+(?:me|us)\b/i
+const CALLBACK_TARGET_PATTERN =
+  "(?:you\\s+guys|the\\s+owner|the\\s+team|jayson|jason|jase|jay|someone|somebody|anyone|owner|team|you|[a-z][a-z'-]{1,30})";
+const CALLBACK_VERB_PATTERN =
+  "(?:call(?:\\s+back)?|ring|contact|phone|get\\s+back\\s+to\\s+me|follow\\s+up)";
+
+function editDistanceAtMostOne(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let edits = 0;
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > 1) return false;
+    if (a.length > b.length) {
+      i += 1;
+    } else if (b.length > a.length) {
+      j += 1;
+    } else {
+      i += 1;
+      j += 1;
+    }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
+function isJaysonAliasToken(token: string): boolean {
+  const t = token.toLowerCase();
+  const likelyJaysonPrefix = /^(jay|jas|jae)/.test(t);
+  return (
+    ["jayson", "jason", "jase", "jay"].includes(t) ||
+    (likelyJaysonPrefix &&
+      t.length >= 5 &&
+      (editDistanceAtMostOne(t, "jayson") || editDistanceAtMostOne(t, "jason")))
   );
-  if (personMatch?.[1] && !/^(someone|you|anyone|a|the|i|me|we|us)\b/i.test(personMatch[1])) {
-    requestedPerson = personMatch[1];
+}
+
+function normaliseCallbackSpeechForIntent(userSpeech: string): string {
+  let speech = normaliseSpeechForIntent(userSpeech);
+  speech = speech
+    .replace(/\byou guys\b/g, "jayson")
+    .replace(/\bthe owner\b/g, "jayson")
+    .replace(/\bowner\b/g, "jayson")
+    .replace(/\bthe team\b/g, "jayson")
+    .replace(/\bteam\b/g, "jayson")
+    .replace(/\bsomeone\b/g, "jayson")
+    .replace(/\bsomebody\b/g, "jayson")
+    .replace(/\banyone\b/g, "jayson");
+
+  return speech
+    .split(/\s+/)
+    .map((token) => (isJaysonAliasToken(token) ? "jayson" : token))
+    .join(" ")
+    .trim();
+}
+
+function callbackTargetName(rawTarget: string | null | undefined): string {
+  const target = normaliseSpeechForIntent(rawTarget ?? "");
+  if (!target) return DEFAULT_CALLBACK_TARGET_NAME;
+
+  if (
+    [
+      "someone",
+      "somebody",
+      "anyone",
+      "you",
+      "you guys",
+      "the owner",
+      "owner",
+      "the team",
+      "team",
+    ].includes(target)
+  ) {
+    return DEFAULT_CALLBACK_TARGET_NAME;
   }
 
-  return { detected, requestedPerson };
+  const words = target.split(/\s+/);
+  if (words.some(isJaysonAliasToken)) return DEFAULT_CALLBACK_TARGET_NAME;
+  if (words.length > 2) return DEFAULT_CALLBACK_TARGET_NAME;
+  if (!words.every((word) => /^[a-z][a-z'-]{1,30}$/i.test(word))) {
+    return DEFAULT_CALLBACK_TARGET_NAME;
+  }
+
+  return titleCaseName(target);
+}
+
+/**
+ * Detects caller callback requests before OpenAI/Supabase so Micah can answer
+ * with the exact callback collection line immediately.
+ */
+function detectCallbackIntent(userSpeech: string): CallbackIntentDetection {
+  const speech = normaliseSpeechForIntent(userSpeech);
+  const normalizedSpeech = normaliseCallbackSpeechForIntent(userSpeech);
+  if (!speech) {
+    return {
+      detected: false,
+      normalizedSpeech,
+      detectedName: DEFAULT_CALLBACK_TARGET_NAME,
+      matchedRule: null,
+    };
+  }
+
+  const rules: Array<{ name: string; pattern: RegExp; targetGroup?: number }> = [
+    {
+      name: "target_can_call_me",
+      pattern: new RegExp(
+        `\\b(?:can|could|would)\\s+(${CALLBACK_TARGET_PATTERN})(?:\\s+please)?\\s+${CALLBACK_VERB_PATTERN}(?:\\s+(?:me|us))?(?:\\s+back)?\\b`
+      ),
+      targetGroup: 1,
+    },
+    {
+      name: "ask_target_to_callback",
+      pattern: new RegExp(
+        `\\b(?:(?:i\\s+need|tell|ask|get|have)\\s+|(?:can|could|would)\\s+you\\s+(?:please\\s+)?(?:tell|ask|get|have)\\s+)(${CALLBACK_TARGET_PATTERN})\\s+(?:to\\s+)?${CALLBACK_VERB_PATTERN}(?:\\s+(?:me|us))?(?:\\s+back)?\\b`
+      ),
+      targetGroup: 1,
+    },
+    {
+      name: "speak_to_target",
+      pattern: new RegExp(
+        `\\b(?:(?:can|could|would)\\s+(?:i|we)|i\\s+want|i\\s+need)\\s+(?:please\\s+)?(?:speak|talk|chat)\\s+(?:to|with)\\s+(${CALLBACK_TARGET_PATTERN})\\b`
+      ),
+      targetGroup: 1,
+    },
+    {
+      name: "direct_callback_request",
+      pattern:
+        /\b(?:i\s+want|i\s+need|can\s+i\s+get|could\s+i\s+get|would\s+like|i\s+d\s+like)\s+(?:a\s+)?(?:callback|call\s+back|phone\s+call|call)\b/,
+    },
+    {
+      name: "call_me_back_phrase",
+      pattern: /\b(?:please\s+)?(?:call|ring|phone|contact)\s+(?:me|us)(?:\s+back)?\b/,
+    },
+    {
+      name: "get_back_or_follow_up",
+      pattern: /\b(?:get\s+back\s+to\s+me|follow\s+up\s+(?:with\s+)?me|follow\s+me\s+up)\b/,
+    },
+    {
+      name: "callback_from_target",
+      pattern: new RegExp(
+        `\\b(?:callback|call\\s+back|phone\\s+call|call)\\s+from\\s+(${CALLBACK_TARGET_PATTERN})\\b`
+      ),
+      targetGroup: 1,
+    },
+  ];
+
+  for (const rule of rules) {
+    const match = speech.match(rule.pattern);
+    if (!match) continue;
+    return {
+      detected: true,
+      normalizedSpeech,
+      detectedName: callbackTargetName(rule.targetGroup ? match[rule.targetGroup] : null),
+      matchedRule: rule.name,
+    };
+  }
+
+  return {
+    detected: false,
+    normalizedSpeech,
+    detectedName: DEFAULT_CALLBACK_TARGET_NAME,
+    matchedRule: null,
+  };
 }
 
 /**
@@ -323,22 +470,6 @@ function demoStaticAnswerForSpeech(userSpeech: string): DemoStaticAnswer | null 
   return null;
 }
 
-function isCallbackRequestFastPathSpeech(userSpeech: string): boolean {
-  const speech = normaliseSpeechForIntent(userSpeech).replace(/\bjason\b/g, "jayson");
-  if (!speech) return false;
-
-  return [
-    /\bjayson\s+(?:please\s+)?(?:call|ring|phone)\s+me(?:\s+back)?\b/,
-    /\bcan\s+jayson\s+(?:please\s+)?(?:call|ring|phone)\s+me(?:\s+back)?\b/,
-    /\bcan\s+someone\s+(?:please\s+)?(?:call|ring|phone)\s+me\s+back\b/,
-    /\bcan\s+i\s+(?:please\s+)?(?:speak|talk)\s+(?:to|with)\s+jayson\b/,
-    /\bget\s+jayson\s+to\s+(?:call|ring|phone)\s+me(?:\s+back)?\b/,
-    /\bget\s+jayson\s+to\s+(?:call|ring|phone)\s+me\b/,
-    /\bcall\s+me\s+back\b/,
-    /\bcan\s+someone\s+call\s+me\s+back\b/,
-  ].some((pattern) => pattern.test(speech));
-}
-
 type CallbackDetails = {
   name: string | null;
   phone: string | null;
@@ -466,22 +597,15 @@ function callbackDetailReply(details: CallbackDetails): string | null {
   return DOS_LEAD_CAPTURE_ACK;
 }
 
-function callbackDetailsAreEmailable(details: CallbackDetails): boolean {
-  return !!details.phone || !!details.email;
+function callbackDetailsAreEmailable(
+  details: CallbackDetails,
+  twilioFrom: string
+): boolean {
+  return !!(twilioFrom?.trim() || details.phone || details.email);
 }
 
-function cleanCallbackTargetName(rawName: string | null | undefined): string | null {
-  const name = rawName?.trim().replace(/[.,;:!?]+$/g, "");
-  if (!name) return null;
-
-  const lower = name.toLowerCase();
-  if (["someone", "somebody", "anyone", "me", "you", "yourself"].includes(lower)) {
-    return null;
-  }
-  if (lower === "jason") return "Jayson";
-  if (lower === "jayson") return "Jayson";
-  if (!/^[a-z][a-z'-]{1,30}$/i.test(name)) return null;
-  return name.charAt(0).toUpperCase() + name.slice(1);
+function callbackDetailEmailTier(details: CallbackDetails): MicahLeadEmailTier {
+  return details.name || details.email ? "full" : "basic";
 }
 
 function callbackRequestReplyForSpeech(userSpeech: string): string | null {
@@ -499,41 +623,10 @@ function callbackRequestReplyForSpeech(userSpeech: string): string | null {
     return `I can't place calls on hold just yet, but I can take your details so Jayson can follow up properly. ${CALLBACK_DETAILS_ASK}`;
   }
 
-  const callbackIntent =
-    /\b(?:call|ring|phone)\s+me(?:\s+back)?\b/.test(lower) ||
-    /\bcall\s+you\s+back\b/.test(lower) ||
-    /\bring\s+you\s+back\b/.test(lower) ||
-    /\bget\s+[a-z][a-z'-]{1,30}\s+to\s+(?:call|ring|phone)\b/i.test(speech) ||
-    /\bspeak\s+to\s+[a-z][a-z'-]{1,30}\b/i.test(speech) ||
-    /\bsomeone\s+(?:call|ring|contact)\s+(?:me|us)\b/.test(lower) ||
-    /\bcontact\s+(?:me|us)\b/.test(lower) ||
-    /\bcall\s+(?:me|us)\s+later\b/.test(lower);
-
-  if (!callbackIntent) return null;
-
-  const targetName =
-    cleanCallbackTargetName(
-      speech.match(/\b(?:can|could|would)\s+([a-z][a-z'-]{1,30})\s+(?:please\s+)?(?:call|ring|phone)\s+me(?:\s+back)?\b/i)?.[1]
-    ) ??
-    cleanCallbackTargetName(
-      speech.match(/\b(?:can|could|would)\s+(?:you\s+)?get\s+([a-z][a-z'-]{1,30})\s+to\s+(?:call|ring|phone)\b/i)?.[1]
-    ) ??
-    cleanCallbackTargetName(
-      speech.match(/\b(?:can|could|would)\s+i\s+speak\s+to\s+([a-z][a-z'-]{1,30})\b/i)?.[1]
-    ) ??
-    cleanCallbackTargetName(
-      speech.match(/\bspeak\s+to\s+([a-z][a-z'-]{1,30})\b/i)?.[1]
-    );
-
-  if (targetName) {
-    return `Sure, I'll let ${targetName} know to call you back as soon as possible. ${CALLBACK_DETAILS_ASK}`;
-  }
-
-  if (/\bjayson\b/i.test(speech) || /\bjason\b/i.test(speech)) {
-    return `Sure, I'll let Jayson know to call you back as soon as possible. ${CALLBACK_DETAILS_ASK}`;
-  }
-
-  return `Sure, I'll arrange a callback as soon as possible. ${CALLBACK_DETAILS_ASK}`;
+  const callbackIntent = detectCallbackIntent(speech);
+  return callbackIntent.detected
+    ? callbackFastPathReplyForName(callbackIntent.detectedName)
+    : null;
 }
 
 /**
@@ -688,62 +781,6 @@ function buildDemoStaticAnswerTwiML(
   return vr.toString();
 }
 
-function callbackRequestMp3Exists(): boolean {
-  try {
-    return existsSync(CALLBACK_REQUEST_MP3_FILE);
-  } catch {
-    return false;
-  }
-}
-
-function buildStaticCallbackRequestTwiML(processUrl: string, callSid: string): string {
-  const gatherUrl = buildProcessUrl(processUrl, { callbackMode: true });
-  const hasCommittedMp3 = callbackRequestMp3Exists();
-
-  let firstVerb: string;
-  let fallbackUsed: string;
-  if (hasCommittedMp3) {
-    firstVerb = `<Play>${CALLBACK_REQUEST_MP3_URL}?v=callback-v1</Play>`;
-    fallbackUsed = "committed-mp3";
-  } else {
-    const directTtsUrl = buildMicahDirectTtsUrl(CALLBACK_FAST_PATH_REPLY);
-    if (directTtsUrl) {
-      firstVerb = `<Play>${directTtsUrl}</Play>`;
-      fallbackUsed = "direct-elevenlabs-tts";
-    } else {
-      const fallbackMp3Url = process.env.MICAH_FALLBACK_MP3_URL?.trim() || null;
-      if (fallbackMp3Url) {
-        firstVerb = `<Play>${fallbackMp3Url}</Play>`;
-        fallbackUsed = "micah-fallback-mp3-env";
-      } else {
-        firstVerb = `<Pause length="1"/>`;
-        fallbackUsed = "silent-pause";
-      }
-    }
-  }
-
-  console.warn("[micah/voice/process] callback request hard static TwiML", {
-    micahVoiceQA: true,
-    event: "voice_process_callback_request_hard_static_twiml",
-    CallSid: callSid || null,
-    mp3Url: CALLBACK_REQUEST_MP3_URL,
-    committedMp3Present: hasCommittedMp3,
-    gatherUrl,
-    fallbackUsed,
-    pipeline:
-      "Immediate TwiML: committed public MP3, direct ElevenLabs Aussie Micah TTS, MICAH_FALLBACK_MP3_URL, or silent <Pause>. No OpenAI, Supabase, Resend, or Twilio <Say voice='alice'>.",
-  });
-
-  return [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    "<Response>",
-    firstVerb,
-    `<Gather input="speech" action="${gatherUrl}" method="POST" language="en-AU" actionOnEmptyResult="true"></Gather>`,
-    `<Redirect method="POST">${gatherUrl}</Redirect>`,
-    "</Response>",
-  ].join("");
-}
-
 function applyImmediateDirectMicahPlay(
   vr: InstanceType<typeof twilio.twiml.VoiceResponse>,
   text: string,
@@ -774,6 +811,35 @@ function applyImmediateDirectMicahPlay(
     return;
   }
   applyMicahVoice(vr, { kind: "silent", text });
+}
+
+function buildInitialCallbackIntentTwiML(
+  reply: string,
+  processUrl: string,
+  callSid: string
+): string {
+  const vr = new twilio.twiml.VoiceResponse();
+  const gatherUrl = buildProcessUrl(processUrl, { callbackMode: true });
+
+  applyImmediateDirectMicahPlay(
+    vr,
+    reply,
+    callSid,
+    "voice_process_callback_intent_fast_path_tts"
+  );
+
+  vr.gather({
+    input: ["speech"],
+    timeout: 15,
+    speechTimeout: "auto",
+    actionOnEmptyResult: true,
+    action: gatherUrl,
+    method: "POST",
+    language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
+  });
+
+  vr.redirect({ method: "POST" }, gatherUrl);
+  return vr.toString();
 }
 
 function buildImmediateCallbackGatherTwiML(
@@ -833,6 +899,7 @@ async function sendCallbackDetailLeadEmail(params: {
       { role: "assistant", content: CALLBACK_FAST_PATH_REPLY },
       { role: "user", content: params.userSpeech },
     ],
+    tier: callbackDetailEmailTier(params.details),
   });
 }
 
@@ -964,22 +1031,28 @@ async function handleProcess(request: Request) {
     inboundRoute: classifyMicahVoiceInbound(dialedTo),
   });
 
-  if (userSpeechRaw && isCallbackRequestFastPathSpeech(userSpeechRaw)) {
-    console.warn("[micah/voice/process] callback request static fast path", {
+  const initialCallbackIntent = userSpeechRaw ? detectCallbackIntent(userSpeechRaw) : null;
+  if (initialCallbackIntent?.detected) {
+    const callbackReply = callbackFastPathReplyForName(initialCallbackIntent.detectedName);
+    console.warn("[micah/voice/process] callback_intent_detected", {
       micahVoiceQA: true,
-      event: "voice_process_callback_request_fast_path",
+      event: "callback_intent_detected",
       CallSid: callSid || null,
       From: from || null,
       To: dialedTo || null,
-      speechPreview: userSpeechRaw.slice(0, 200),
+      rawSpeech: userSpeechRaw,
+      normalizedSpeech: initialCallbackIntent.normalizedSpeech,
+      detectedName: initialCallbackIntent.detectedName,
+      matchedRule: initialCallbackIntent.matchedRule,
       voiceId: MICAH_ELEVENLABS_VOICE_ID,
-      mp3Url: CALLBACK_REQUEST_MP3_URL,
+      replyPreview: callbackReply,
       pipeline:
-        "Matched callback request before OpenAI, Supabase context/upload, Resend, or dynamic lead logic. Returning hard static MP3 TwiML with silent callback-mode Gather.",
+        "Matched callback intent before OpenAI, Supabase context/upload, Resend, or generic lead logic. Returning callback response first, then silent callbackMode=1 Gather.",
     });
+
     return twimlResponse(
-      buildStaticCallbackRequestTwiML(processUrl, callSid),
-      "[micah/voice/process] callback-request-fast-path"
+      buildInitialCallbackIntentTwiML(callbackReply, processUrl, callSid),
+      "[micah/voice/process] callback-intent-fast-path"
     );
   }
 
@@ -989,7 +1062,7 @@ async function handleProcess(request: Request) {
 
     if (callbackReply) {
       let callbackLeadEmailSent = false;
-      if (callbackDetailsAreEmailable(callbackDetails)) {
+      if (callbackDetailsAreEmailable(callbackDetails, from)) {
         try {
           callbackLeadEmailSent = await withTimeout(
             sendCallbackDetailLeadEmail({
@@ -1006,6 +1079,14 @@ async function handleProcess(request: Request) {
         } catch (e) {
           console.warn("[micah/voice/process] callback detail lead email threw; skipped:", e);
         }
+      } else if (from?.trim()) {
+        scheduleEarlyCallbackLeadEmail({
+          callSid,
+          callerNumber: from,
+          latestCallerTurn: userSpeechRaw,
+          micahReply: callbackReply,
+          timeoutMs: LEAD_EMAIL_TIMEOUT_MS,
+        });
       }
 
       console.warn("[micah/voice/process] callback detail static fast path", {
@@ -1016,7 +1097,7 @@ async function handleProcess(request: Request) {
         hasName: !!callbackDetails.name,
         hasPhone: !!callbackDetails.phone,
         hasEmail: !!callbackDetails.email,
-        leadEmailAttempted: callbackDetailsAreEmailable(callbackDetails),
+        leadEmailAttempted: callbackDetailsAreEmailable(callbackDetails, from),
         leadEmailSent: callbackLeadEmailSent,
         replyPreview: callbackReply,
         pipeline:
@@ -1063,7 +1144,11 @@ async function handleProcess(request: Request) {
       tenantId = context.nextTenantId;
       const leadMeta = context.nextLeadMeta;
       const meta = (leadMeta?.metadata ?? null) as
-        | { summary_email_sent?: boolean; voice_lead_email_sent?: boolean }
+        | {
+            summary_email_sent?: boolean;
+            voice_lead_email_sent?: boolean;
+            voice_lead_email_basic_sent?: boolean;
+          }
         | null;
       existingLeadMetadata =
         leadMeta?.metadata && typeof leadMeta.metadata === "object" && !Array.isArray(leadMeta.metadata)
@@ -1163,6 +1248,16 @@ async function handleProcess(request: Request) {
       replyPreview: aiReply,
       pipeline: "Direct hardcoded callback script before OpenAI.",
     });
+    if (from?.trim() && callSid) {
+      scheduleEarlyCallbackLeadEmail({
+        callSid,
+        callerNumber: from,
+        latestCallerTurn: userSpeechRaw,
+        micahReply: aiReply,
+        turns: [...history, { role: "user", content: userSpeechRaw }],
+        timeoutMs: LEAD_EMAIL_TIMEOUT_MS,
+      });
+    }
   } else {
     const openAiApiKey = apiKey;
     if (!openAiApiKey) {
@@ -1203,7 +1298,7 @@ async function handleProcess(request: Request) {
       if (isCallbackTurn) {
         messages.push({
           role: "system",
-          content: buildCallbackIntentBlock(currentCallbackIntent.requestedPerson),
+          content: buildCallbackIntentBlock(currentCallbackIntent.detectedName),
         });
       }
 
@@ -1306,6 +1401,56 @@ async function handleProcess(request: Request) {
     aiReply = DOS_LEAD_CAPTURE_ACK;
   }
 
+  const callTurnsForEmail: ChatTurn[] = [
+    ...history.filter((m) => m.role !== "system"),
+    { role: "user", content: userSpeechRaw },
+  ];
+
+  let leadEmailSentThisTurn = false;
+  if (capturedLead && !leadSummaryEmailSent) {
+    const emailTier: MicahLeadEmailTier = "full";
+    console.log("[micah/voice/process] sending DOS lead email", {
+      micahVoiceQA: true,
+      event: "voice_process_lead_email_send_start",
+      CallSid: callSid || null,
+      tier: emailTier,
+      duplicateGuardState: leadSummaryEmailSent ? "supabase_metadata_sent" : "clear",
+      notifyRecipientMask: maskEmailAddress(resolveLeadRecipient()),
+      pipeline:
+        "Resend before Supabase call_logs/lead persistence so DB timeouts do not block lead email.",
+    });
+    try {
+      leadEmailSentThisTurn = await withTimeout(
+        sendMicahLeadSummaryEmail({
+          callSid,
+          callerNumber: from,
+          transcriptSnippet: callTurnsForEmail
+            .map((m) => `${m.role === "user" ? "Caller" : "Micah"}: ${m.content}`)
+            .join("\n")
+            .slice(0, 4000),
+          micahReply: aiReply,
+          timestamp: new Date().toISOString(),
+          turns: callTurnsForEmail,
+          tier: emailTier,
+        }),
+        LEAD_EMAIL_TIMEOUT_MS,
+        "lead-summary-email",
+        false
+      );
+    } catch (e) {
+      console.warn("[micah/voice/process] lead summary email threw; skipped:", e);
+    }
+    console.log("[micah/voice/process] DOS lead email result", {
+      micahVoiceQA: true,
+      event: leadEmailSentThisTurn
+        ? "voice_process_lead_email_sent"
+        : "voice_process_lead_email_failed",
+      CallSid: callSid || null,
+      sent: leadEmailSentThisTurn,
+      tier: emailTier,
+    });
+  }
+
   if (supabase) {
     try {
       await withTimeout(
@@ -1356,74 +1501,35 @@ async function handleProcess(request: Request) {
     });
   }
 
-  const callTurnsForEmail: ChatTurn[] = [
-    ...history.filter((m) => m.role !== "system"),
-    { role: "user", content: userSpeechRaw },
-  ];
-
-  if (capturedLead && !leadSummaryEmailSent) {
-    let sent = false;
-    console.log("[micah/voice/process] sending DOS lead email", {
-      micahVoiceQA: true,
-      event: "voice_process_lead_email_send_start",
-      CallSid: callSid || null,
-      duplicateGuardState: leadSummaryEmailSent ? "supabase_metadata_sent" : "clear",
-    });
+  if (leadEmailSentThisTurn && supabase && callSid) {
     try {
-      sent = await withTimeout(
-        sendMicahLeadSummaryEmail({
-          callSid,
-          callerNumber: from,
-          transcriptSnippet: callTurnsForEmail
-            .map((m) => `${m.role === "user" ? "Caller" : "Micah"}: ${m.content}`)
-            .join("\n")
-            .slice(0, 4000),
-          micahReply: aiReply,
-          timestamp: new Date().toISOString(),
-          turns: callTurnsForEmail,
-        }),
-        LEAD_EMAIL_TIMEOUT_MS,
-        "lead-summary-email",
-        false
+      await withTimeout(
+        supabase
+          .from("leads")
+          .update({
+            metadata: {
+              ...existingLeadMetadata,
+              source: "twilio_voice_turn",
+              messages: [
+                ...history.filter((m) => m.role !== "system"),
+                { role: "user", content: userSpeechRaw },
+                { role: "assistant", content: aiReply },
+              ],
+              tenant_id: tenantId ?? undefined,
+              openai_voice: MICAH_ELEVENLABS_VOICE_ID,
+              summary_email_sent: true,
+              voice_lead_email_sent: true,
+              voice_lead_email_basic_sent: true,
+              voice_lead_email_subject: "New Micah Voice Lead - DOS",
+            },
+          })
+          .eq("call_sid", callSid) as unknown as Promise<unknown>,
+        SUPABASE_WRITE_TIMEOUT_MS,
+        "supabase-lead-email-flag",
+        null
       );
     } catch (e) {
-      console.warn("[micah/voice/process] lead summary email threw; skipped:", e);
-    }
-    console.log("[micah/voice/process] DOS lead email result", {
-      micahVoiceQA: true,
-      event: sent ? "voice_process_lead_email_sent" : "voice_process_lead_email_failed",
-      CallSid: callSid || null,
-      sent,
-    });
-    if (sent && supabase && callSid) {
-      try {
-        await withTimeout(
-          supabase
-            .from("leads")
-            .update({
-              metadata: {
-                ...existingLeadMetadata,
-                source: "twilio_voice_turn",
-                messages: [
-                  ...history.filter((m) => m.role !== "system"),
-                  { role: "user", content: userSpeechRaw },
-                  { role: "assistant", content: aiReply },
-                ],
-                tenant_id: tenantId ?? undefined,
-                openai_voice: MICAH_ELEVENLABS_VOICE_ID,
-                summary_email_sent: true,
-                voice_lead_email_sent: true,
-                voice_lead_email_subject: "New Micah Voice Lead - DOS",
-              },
-            })
-            .eq("call_sid", callSid) as unknown as Promise<unknown>,
-          SUPABASE_WRITE_TIMEOUT_MS,
-          "supabase-lead-email-flag",
-          null
-        );
-      } catch (e) {
-        console.warn("[micah/voice/process] lead email sent; metadata flag skipped:", e);
-      }
+      console.warn("[micah/voice/process] lead email sent; metadata flag skipped:", e);
     }
   }
 

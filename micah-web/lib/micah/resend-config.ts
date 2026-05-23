@@ -1,13 +1,13 @@
 import { maskApiCredential } from "@/lib/micah/mask-api-credential";
 
 /**
- * Micah production historically used `MICAH_RESEND_API_KEY`; some projects also set `RESEND_API_KEY`.
- * Prefer the Micah-specific key when both exist (invalid duplicate keys have been seen in Vercel).
+ * Prefer canonical `RESEND_API_KEY` (Vercel production). Legacy `MICAH_RESEND_API_KEY` is only
+ * used when `RESEND_API_KEY` is unset — stale Micah-specific keys have blocked live lead email.
  */
 export function resolveResendApiKey(): string | null {
   return (
-    process.env.MICAH_RESEND_API_KEY?.trim() ||
     process.env.RESEND_API_KEY?.trim() ||
+    process.env.MICAH_RESEND_API_KEY?.trim() ||
     null
   );
 }
@@ -95,10 +95,10 @@ export function buildResendEnvDiagnostics(): ResendEnvDiagnostics {
   return {
     apiKeyConfigured: !!apiKey,
     apiKeyMask: maskApiCredential(apiKey),
-    apiKeySource: micahResendKey
-      ? "MICAH_RESEND_API_KEY"
-      : resendKey
-        ? "RESEND_API_KEY"
+    apiKeySource: resendKey
+      ? "RESEND_API_KEY"
+      : micahResendKey
+        ? "MICAH_RESEND_API_KEY"
         : null,
     fromConfigured: !!from,
     fromPreview: from ? from.replace(/<[^>]+>/, "<…>") : null,

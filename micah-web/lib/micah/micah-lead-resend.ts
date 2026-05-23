@@ -11,6 +11,16 @@ import {
 const DOS_LEAD_SUBJECT = "New Micah Voice Lead - DOS";
 const DOS_NEXT_ACTION = "Jayson to follow up personally.";
 
+export type MicahLeadEmailTier = "basic" | "full";
+
+type LeadEmailSentState = {
+  basic: boolean;
+  full: boolean;
+};
+
+const CALLBACK_INTENT_PATTERN =
+  /\b(?:call me back|callback|ring me|contact me|follow up|speak to jayson|get jayson|can jayson|have jayson)\b/i;
+
 type LeadDetails = {
   callerName: string | null;
   businessName: string | null;
@@ -68,8 +78,7 @@ export function micahConversationLooksLikeCapturedLead(params: {
   const hasBusiness = looksLikeBusinessContext(transcript);
   const hasNeed = looksLikeNeedContext(transcript);
   const micahIsWrapping = micahReplyLooksLikeLeadWrapUp(params.micahReply);
-  const hasCallbackRequest =
-    /\b(?:call me back|callback|ring me|contact me|follow up|speak to jayson)\b/i.test(transcript);
+  const hasCallbackRequest = CALLBACK_INTENT_PATTERN.test(transcript);
 
   return (
     // Demo / DOS: send as soon as we can act — do not wait for perfect data
@@ -82,8 +91,24 @@ export function micahConversationLooksLikeCapturedLead(params: {
     // Callback lead: name + phone + email collected
     (hasName && hasPhone && hasEmail) ||
     // Callback intent with name and phone (caller ID counts as phone)
-    (hasCallbackRequest && hasName && hasPhone)
+    (hasCallbackRequest && hasName && hasPhone) ||
+    // Early demo lead: callback intent + Twilio caller ID (no name required yet)
+    (hasCallbackRequest && hasPhone)
   );
+}
+
+/** True when we can send a minimal DOS lead email (callback + Twilio From). */
+export function micahEarlyCallbackLeadReady(params: {
+  callerNumber: string;
+  latestCallerTurn?: string;
+  history?: ChatTurn[];
+}): boolean {
+  const transcript = [
+    ...(params.history ?? []).map((m) => m.content),
+    params.latestCallerTurn ?? "",
+  ].join("\n");
+  const hasPhone = !!params.callerNumber?.trim();
+  return hasPhone && CALLBACK_INTENT_PATTERN.test(transcript);
 }
 
 export function extractEmailFromText(s: string): string | null {
@@ -193,13 +218,71 @@ function formatTranscript(turns: ChatTurn[], micahReply: string): string {
   return lines.join("\n");
 }
 
-function getSentCallSidSet(): Set<string> {
+function getSentCallSidStateMap(): Map<string, LeadEmailSentState> {
   const key = "__micahVoiceLeadEmailSentCallSids";
   const globalStore = globalThis as typeof globalThis & Record<string, unknown>;
-  if (!(globalStore[key] instanceof Set)) {
-    globalStore[key] = new Set<string>();
+  if (!(globalStore[key] instanceof Map)) {
+    globalStore[key] = new Map<string, LeadEmailSentState>();
   }
-  return globalStore[key] as Set<string>;
+  return globalStore[key] as Map<string, LeadEmailSentState>;
+}
+
+function leadEmailTierAlreadySent(
+  callSid: string,
+  tier: MicahLeadEmailTier
+): boolean {
+  const state = getSentCallSidStateMap().get(callSid);
+  if (!state) return false;
+  return tier === "basic" ? state.basic : state.full;
+}
+
+function markLeadEmailTierSent(callSid: string, tier: MicahLeadEmailTier): void {
+  const map = getSentCallSidStateMap();
+  const prev = map.get(callSid) ?? { basic: false, full: false };
+  if (tier === "basic") prev.basic = true;
+  else prev.full = true;
+  map.set(callSid, prev);
+}
+
+/**
+ * Fire-and-forget early callback lead email (does not block TwiML / OpenAI / Supabase).
+ */
+export function scheduleEarlyCallbackLeadEmail(params: {
+  callSid: string;
+  callerNumber: string;
+  latestCallerTurn: string;
+  micahReply?: string;
+  turns?: ChatTurn[];
+  timeoutMs?: number;
+}): void {
+  if (!params.callSid?.trim() || !micahEarlyCallbackLeadReady(params)) return;
+
+  const run = async () => {
+    await sendMicahLeadSummaryEmail({
+      callSid: params.callSid,
+      callerNumber: params.callerNumber,
+      transcriptSnippet: params.latestCallerTurn,
+      micahReply: params.micahReply ?? "",
+      timestamp: new Date().toISOString(),
+      turns: params.turns,
+      tier: "basic",
+    });
+  };
+
+  const timeoutMs = params.timeoutMs ?? 5_000;
+  void Promise.race([
+    run(),
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, timeoutMs);
+    }),
+  ]).catch((e) => {
+    console.warn("[micah-lead-resend] early callback lead email failed", {
+      micahVoiceQA: true,
+      event: "voice_lead_email_early_schedule_failed",
+      CallSid: params.callSid,
+      error: formatResendError(e),
+    });
+  });
 }
 
 /**
@@ -213,16 +296,21 @@ export async function sendMicahLeadSummaryEmail(params: {
   micahReply: string;
   timestamp?: string;
   turns?: ChatTurn[];
+  /** `basic` = callback + Twilio From; `full` = richer capture / wrap-up (allowed once after basic). */
+  tier?: MicahLeadEmailTier;
 }): Promise<boolean> {
+  const tier: MicahLeadEmailTier = params.tier ?? "full";
   const apiKey = resolveResendApiKey();
   const to = resolveLeadRecipient();
   const fromAddr = resolveResendFromAddress();
 
   if (!apiKey) {
-    console.warn("[micah-lead-resend] RESEND_API_KEY unset - skip DOS lead email", {
+    console.warn("[micah-lead-resend] Resend API key not configured - skip DOS lead email", {
       micahVoiceQA: true,
       event: "voice_lead_email_skip_no_api_key",
       CallSid: params.callSid || null,
+      resendApiKeyConfigured: false,
+      tier,
     });
     return false;
   }
@@ -233,18 +321,20 @@ export async function sendMicahLeadSummaryEmail(params: {
         micahVoiceQA: true,
         event: "voice_lead_email_skip_no_recipient",
         CallSid: params.callSid || null,
+        resendApiKeyConfigured: true,
+        tier,
       }
     );
     return false;
   }
 
-  const sentCallSids = getSentCallSidSet();
-  if (params.callSid && sentCallSids.has(params.callSid)) {
+  if (params.callSid && leadEmailTierAlreadySent(params.callSid, tier)) {
     console.log("[micah-lead-resend] duplicate DOS lead email skipped", {
       micahVoiceQA: true,
       event: "voice_lead_email_duplicate_skipped",
       CallSid: params.callSid,
-      duplicateGuardState: "in_memory_call_sid_set",
+      tier,
+      duplicateGuardState: `in_memory_${tier}_already_sent`,
     });
     return true;
   }
@@ -285,10 +375,15 @@ export async function sendMicahLeadSummaryEmail(params: {
     micahVoiceQA: true,
     event: "voice_lead_email_resend_attempt",
     CallSid: params.callSid || null,
+    tier,
+    resendApiKeyConfigured: true,
     recipientMask: maskEmailAddress(to),
     fromPreview: fromAddr.replace(/<[^>]+>/, "<…>"),
     subject: DOS_LEAD_SUBJECT,
-    duplicateGuardState: params.callSid && sentCallSids.has(params.callSid) ? "blocked" : "clear",
+    duplicateGuardState:
+      params.callSid && leadEmailTierAlreadySent(params.callSid, tier)
+        ? "blocked"
+        : "clear",
   });
 
   try {
@@ -304,7 +399,11 @@ export async function sendMicahLeadSummaryEmail(params: {
         micahVoiceQA: true,
         event: "voice_lead_email_resend_error",
         CallSid: params.callSid || null,
+        tier,
         recipientMask: maskEmailAddress(to),
+        fromPreview: fromAddr.replace(/<[^>]+>/, "<…>"),
+        resendApiKeyConfigured: true,
+        resendSuccess: false,
         error: formatResendError(error),
       });
       return false;
@@ -313,11 +412,18 @@ export async function sendMicahLeadSummaryEmail(params: {
       micahVoiceQA: true,
       event: "voice_lead_email_resend_ok",
       CallSid: params.callSid || null,
+      tier,
       recipientMask: maskEmailAddress(to),
+      fromPreview: fromAddr.replace(/<[^>]+>/, "<…>"),
+      resendApiKeyConfigured: true,
+      resendSuccess: true,
       resendId: data?.id ?? null,
     });
     if (params.callSid) {
-      sentCallSids.add(params.callSid);
+      markLeadEmailTierSent(params.callSid, tier);
+      if (tier === "full") {
+        markLeadEmailTierSent(params.callSid, "basic");
+      }
     }
     return true;
   } catch (e) {
@@ -325,7 +431,11 @@ export async function sendMicahLeadSummaryEmail(params: {
       micahVoiceQA: true,
       event: "voice_lead_email_resend_throw",
       CallSid: params.callSid || null,
+      tier,
       recipientMask: maskEmailAddress(to),
+      fromPreview: fromAddr.replace(/<[^>]+>/, "<…>"),
+      resendApiKeyConfigured: true,
+      resendSuccess: false,
       error: formatResendError(e),
     });
     return false;
