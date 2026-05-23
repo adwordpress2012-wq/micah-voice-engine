@@ -57,18 +57,72 @@ const FOLLOWUP_AUDIO_VERSION = "20260523-no-repeat-greeting";
 const DOS_LEAD_CAPTURE_ACK =
   "Perfect, I'll pass that to Jayson and he'll follow up personally.";
 const DEFAULT_CALLBACK_TARGET_NAME = "Jayson";
-const CALLBACK_DETAILS_ASK =
-  "Can I grab your name, mobile number, and email address?";
+const CALLBACK_NAME_MOBILE_ASK =
+  "What's your name and best mobile number?";
 function callbackFastPathReplyForName(targetName: string): string {
-  return `Sure, ${targetName} will call you back. ${CALLBACK_DETAILS_ASK}`;
+  return `Sure, ${targetName} will call you back. ${CALLBACK_NAME_MOBILE_ASK}`;
 }
 const CALLBACK_FAST_PATH_REPLY = callbackFastPathReplyForName(DEFAULT_CALLBACK_TARGET_NAME);
-const CALLBACK_ONLY_PHONE_REPLY =
-  "Perfect, thanks. What's your name and email address?";
-const CALLBACK_ONLY_NAME_REPLY =
-  "Thanks. What's the best mobile number and email address?";
-const CALLBACK_NAME_PHONE_REPLY =
-  "Perfect. What's the best email address for you?";
+const CALLBACK_EMAIL_ASK =
+  "Thanks. What's the best email address for you?";
+const CALLBACK_ONLY_PHONE_REPLY = "Thanks. What's your name?";
+const CALLBACK_ONLY_NAME_REPLY = "Thanks. What's the best mobile number for you?";
+
+type CallbackField = "name" | "phone" | "email";
+type CallbackFieldFlags = Record<CallbackField, boolean>;
+type CallbackFieldState = {
+  captured: CallbackFieldFlags;
+  asked: CallbackFieldFlags;
+};
+
+const CALLBACK_FIELDS: CallbackField[] = ["name", "phone", "email"];
+
+function emptyCallbackFieldFlags(): CallbackFieldFlags {
+  return { name: false, phone: false, email: false };
+}
+
+function emptyCallbackFieldState(): CallbackFieldState {
+  return {
+    captured: emptyCallbackFieldFlags(),
+    asked: emptyCallbackFieldFlags(),
+  };
+}
+
+function callbackFieldFlagsToParam(flags: CallbackFieldFlags): string {
+  return CALLBACK_FIELDS.filter((field) => flags[field]).join(",");
+}
+
+function callbackFieldFlagsFromParam(raw: string | null): CallbackFieldFlags {
+  const flags = emptyCallbackFieldFlags();
+  if (!raw) return flags;
+
+  for (const token of raw.split(/[,\s]+/)) {
+    if (CALLBACK_FIELDS.includes(token as CallbackField)) {
+      flags[token as CallbackField] = true;
+    }
+  }
+  return flags;
+}
+
+function parseCallbackFieldState(request: Request): CallbackFieldState {
+  const url = new URL(request.url);
+  return {
+    captured: callbackFieldFlagsFromParam(url.searchParams.get("callbackCaptured")),
+    asked: callbackFieldFlagsFromParam(url.searchParams.get("callbackAsked")),
+  };
+}
+
+function callbackFieldStateWithAsked(
+  state: CallbackFieldState,
+  fields: CallbackField[]
+): CallbackFieldState {
+  const next = {
+    captured: { ...state.captured },
+    asked: { ...state.asked },
+  };
+  for (const field of fields) next.asked[field] = true;
+  return next;
+}
 
 function formString(form: FormData, key: string): string {
   const v = form.get(key);
@@ -101,13 +155,24 @@ function publicAudioUrl(baseUrl: string, path: string): string {
 
 function buildProcessUrl(
   base: string,
-  opts: { leadCapture?: boolean; emptySpeechCount?: number; callbackMode?: boolean }
+  opts: {
+    leadCapture?: boolean;
+    emptySpeechCount?: number;
+    callbackMode?: boolean;
+    callbackFieldState?: CallbackFieldState | null;
+  }
 ): string {
   const url = new URL(base);
   if (opts.leadCapture) url.searchParams.set("leadCapture", "1");
   if (opts.callbackMode) url.searchParams.set("callbackMode", "1");
   if (opts.emptySpeechCount && opts.emptySpeechCount > 0) {
     url.searchParams.set("emptySpeechCount", String(opts.emptySpeechCount));
+  }
+  if (opts.callbackFieldState) {
+    const captured = callbackFieldFlagsToParam(opts.callbackFieldState.captured);
+    const asked = callbackFieldFlagsToParam(opts.callbackFieldState.asked);
+    if (captured) url.searchParams.set("callbackCaptured", captured);
+    if (asked) url.searchParams.set("callbackAsked", asked);
   }
   return url.toString();
 }
@@ -377,10 +442,10 @@ function buildCallbackIntentBlock(requestedPerson: string): string {
   return [
     "## Callback intent detected",
     `The caller is asking for ${requestedPerson} to call them back (or to speak to ${requestedPerson}).`,
-    `Standard opening reply when no details are yet collected: "Sure, ${requestedPerson} will call you back. Can I grab your name, mobile number, and email address?"`,
+    `Standard opening reply when no details are yet collected: "Sure, ${requestedPerson} will call you back. What's your name and best mobile number?"`,
     "If some details are already collected, refer to the lead collection state block and ask only for what is still missing.",
     `If the caller says they will hold or wait: "I can't place calls on hold just yet, but I can take your details so ${requestedPerson} can follow up properly. What's your name and mobile number?"`,
-    "After collecting name, mobile, and email — ask for the best time to call.",
+    "Ask for email only after name and mobile are collected: \"Thanks. What's the best email address for you?\"",
     `Once all details are collected: "Perfect, I'll pass that to ${requestedPerson} and he'll follow up personally."`,
     "Keep each reply short. This is a voice call.",
   ].join("\n");
@@ -651,19 +716,86 @@ function extractCallbackDetails(userSpeech: string): CallbackDetails {
   return { name, phone, email };
 }
 
-function callbackDetailReply(details: CallbackDetails): string | null {
-  const hasName = !!details.name;
-  const hasPhone = !!details.phone;
-  const hasEmail = !!details.email;
+function callbackFieldStateWithDetails(
+  previous: CallbackFieldState,
+  details: CallbackDetails
+): CallbackFieldState {
+  return {
+    captured: {
+      name: previous.captured.name || !!details.name,
+      phone: previous.captured.phone || !!details.phone,
+      email: previous.captured.email || !!details.email,
+    },
+    asked: { ...previous.asked },
+  };
+}
 
-  if (!hasName && !hasPhone && !hasEmail) return null;
-  if (hasPhone && !hasName && !hasEmail) return CALLBACK_ONLY_PHONE_REPLY;
-  if (hasName && !hasPhone && !hasEmail) return CALLBACK_ONLY_NAME_REPLY;
-  if (hasName && hasPhone && !hasEmail) return CALLBACK_NAME_PHONE_REPLY;
-  if (hasName && !hasPhone && hasEmail) return "Thanks. What's the best mobile number for you?";
-  if (!hasName && hasPhone && hasEmail) return "Perfect, thanks. What's your name?";
-  if (!hasName && !hasPhone && hasEmail) return "Thanks. What's your name and best mobile number?";
-  return DOS_LEAD_CAPTURE_ACK;
+function missingCallbackNamePhoneFields(state: CallbackFieldState): CallbackField[] {
+  const missing: CallbackField[] = [];
+  if (!state.captured.name) missing.push("name");
+  if (!state.captured.phone) missing.push("phone");
+  return missing;
+}
+
+function callbackQuestionForFields(
+  fields: CallbackField[],
+  previous: CallbackFieldState
+): string | null {
+  const alreadyAsked = fields.some((field) => previous.asked[field]);
+  const prefix = alreadyAsked ? "No worries." : "Thanks.";
+
+  if (fields.length === 2 && fields.includes("name") && fields.includes("phone")) {
+    return `${prefix} What's your name and best mobile number?`;
+  }
+  if (fields.length === 1 && fields[0] === "name") {
+    return alreadyAsked ? "No worries. What's your name?" : CALLBACK_ONLY_PHONE_REPLY;
+  }
+  if (fields.length === 1 && fields[0] === "phone") {
+    return alreadyAsked
+      ? "No worries. What's the best mobile number for you?"
+      : CALLBACK_ONLY_NAME_REPLY;
+  }
+  if (fields.length === 1 && fields[0] === "email") {
+    return alreadyAsked
+      ? "No worries. What's the best email address for you?"
+      : CALLBACK_EMAIL_ASK;
+  }
+  return null;
+}
+
+function callbackDetailReply(
+  details: CallbackDetails,
+  previousState: CallbackFieldState
+): { reply: string | null; state: CallbackFieldState } {
+  let state = callbackFieldStateWithDetails(previousState, details);
+  const missingNamePhone = missingCallbackNamePhoneFields(state);
+
+  if (missingNamePhone.length > 0) {
+    state = callbackFieldStateWithAsked(state, missingNamePhone);
+    return {
+      reply: callbackQuestionForFields(missingNamePhone, previousState),
+      state,
+    };
+  }
+
+  if (!state.captured.email) {
+    state = callbackFieldStateWithAsked(state, ["email"]);
+    return { reply: CALLBACK_EMAIL_ASK, state };
+  }
+
+  return { reply: DOS_LEAD_CAPTURE_ACK, state };
+}
+
+function callbackEmptySpeechRepeatLine(state: CallbackFieldState): string {
+  const missingNamePhone = missingCallbackNamePhoneFields(state);
+  if (missingNamePhone.length > 0) {
+    return callbackQuestionForFields(missingNamePhone, state) ??
+      "No worries. What's your name and best mobile number?";
+  }
+  if (!state.captured.email) {
+    return "No worries. What's the best email address for you?";
+  }
+  return EMPTY_SPEECH_REPEAT_LINE;
 }
 
 function callbackDetailsAreEmailable(
@@ -689,7 +821,7 @@ function callbackRequestReplyForSpeech(userSpeech: string): string | null {
     /\bi(?:'ll| will)\s+(?:hold|wait|stay\s+on)\b/.test(lower) ||
     /\bstay\s+on\s+the\s+line\b/.test(lower);
   if (holdIntent) {
-    return `I can't place calls on hold just yet, but I can take your details so Jayson can follow up properly. ${CALLBACK_DETAILS_ASK}`;
+    return `I can't place calls on hold just yet, but I can take your details so Jayson can follow up properly. ${CALLBACK_NAME_MOBILE_ASK}`;
   }
 
   const callbackIntent = detectCallbackIntent(speech);
@@ -708,7 +840,8 @@ async function buildContinuationTwiML(
   supabase: SupabaseClient | null,
   callSid: string,
   alreadyInLeadCapture: boolean = false,
-  alreadyInCallbackMode: boolean = false
+  alreadyInCallbackMode: boolean = false,
+  callbackFieldState: CallbackFieldState = emptyCallbackFieldState()
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
@@ -728,7 +861,11 @@ async function buildContinuationTwiML(
   // Propagate lead-capture and callback-mode context so subsequent turns use the right fallbacks.
   const inLeadCapture = alreadyInLeadCapture || replyIsLeadCaptureAsk(aiReply);
   const inCallbackMode = alreadyInCallbackMode || replyIsCallbackMode(aiReply);
-  const gatherUrl = buildProcessUrl(processUrl, { leadCapture: inLeadCapture, callbackMode: inCallbackMode });
+  const gatherUrl = buildProcessUrl(processUrl, {
+    leadCapture: inLeadCapture,
+    callbackMode: inCallbackMode,
+    callbackFieldState: inCallbackMode ? callbackFieldState : null,
+  });
 
   vr.gather({
     input: ["speech"],
@@ -750,7 +887,8 @@ async function buildEmptySpeechTwiML(
   callSid: string,
   emptySpeechCount: number,
   inLeadCapture: boolean,
-  inCallbackMode: boolean = false
+  inCallbackMode: boolean = false,
+  callbackFieldState: CallbackFieldState = emptyCallbackFieldState()
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
@@ -773,8 +911,16 @@ async function buildEmptySpeechTwiML(
 
   // Both paths use micahVoice TTS so the spoken text always matches the constant,
   // regardless of what the static MP3 file on disk contains.
-  const repeatText = inLeadCapture ? LEAD_CAPTURE_REPEAT_LINE : EMPTY_SPEECH_REPEAT_LINE;
-  const repeatLabel = inLeadCapture ? "voice-process-lead-capture-repeat" : "voice-process-empty-speech-repeat";
+  const repeatText = inCallbackMode
+    ? callbackEmptySpeechRepeatLine(callbackFieldState)
+    : inLeadCapture
+      ? LEAD_CAPTURE_REPEAT_LINE
+      : EMPTY_SPEECH_REPEAT_LINE;
+  const repeatLabel = inCallbackMode
+    ? "voice-process-callback-repeat"
+    : inLeadCapture
+      ? "voice-process-lead-capture-repeat"
+      : "voice-process-empty-speech-repeat";
   const repeatResult = await micahVoice({
     text: repeatText,
     callSid: sid,
@@ -790,6 +936,7 @@ async function buildEmptySpeechTwiML(
     leadCapture: inLeadCapture,
     callbackMode: inCallbackMode,
     emptySpeechCount: emptySpeechCount + 1,
+    callbackFieldState: inCallbackMode ? callbackFieldState : null,
   });
 
   vr.gather({
@@ -888,7 +1035,15 @@ function buildInitialCallbackIntentTwiML(
   callSid: string
 ): string {
   const vr = new twilio.twiml.VoiceResponse();
-  const gatherUrl = buildProcessUrl(processUrl, { callbackMode: true });
+  const callbackFieldState = callbackFieldStateWithAsked(
+    emptyCallbackFieldState(),
+    ["name", "phone"]
+  );
+  const gatherUrl = buildProcessUrl(processUrl, {
+    leadCapture: true,
+    callbackMode: true,
+    callbackFieldState,
+  });
 
   applyImmediateDirectMicahPlay(
     vr,
@@ -915,10 +1070,15 @@ function buildImmediateCallbackGatherTwiML(
   reply: string,
   processUrl: string,
   callSid: string,
-  event: string
+  event: string,
+  callbackFieldState: CallbackFieldState
 ): string {
   const vr = new twilio.twiml.VoiceResponse();
-  const gatherUrl = buildProcessUrl(processUrl, { leadCapture: true, callbackMode: true });
+  const gatherUrl = buildProcessUrl(processUrl, {
+    leadCapture: true,
+    callbackMode: true,
+    callbackFieldState,
+  });
 
   applyImmediateDirectMicahPlay(vr, reply, callSid, event);
 
@@ -1030,6 +1190,7 @@ async function handleProcess(request: Request) {
   const emptySpeechCount = parseEmptySpeechCount(request);
   const inLeadCapture = parseLeadCapture(request);
   const inCallbackMode = parseCallbackMode(request);
+  const callbackFieldState = parseCallbackFieldState(request);
   console.log("[micah/voice/process] incoming request", twilioRequestLogContext(request));
 
   let form: FormData;
@@ -1119,6 +1280,8 @@ async function handleProcess(request: Request) {
     detectedName: initialCallbackIntent?.detectedName ?? null,
     inCallbackMode,
     inLeadCapture,
+    callbackCaptured: callbackFieldState.captured,
+    callbackAsked: callbackFieldState.asked,
     twimlBranch: initialCallbackIntent?.detected
       ? "callback-fast-path"
       : !userSpeechRaw
@@ -1153,7 +1316,8 @@ async function handleProcess(request: Request) {
 
   if (userSpeechRaw && inCallbackMode) {
     const callbackDetails = extractCallbackDetails(userSpeechRaw);
-    const callbackReply = callbackDetailReply(callbackDetails);
+    const callbackOutcome = callbackDetailReply(callbackDetails, callbackFieldState);
+    const callbackReply = callbackOutcome.reply;
 
     if (callbackReply) {
       let callbackLeadEmailSent = false;
@@ -1189,9 +1353,11 @@ async function handleProcess(request: Request) {
         event: "voice_process_callback_detail_fast_path",
         CallSid: callSid || null,
         From: from || null,
-        hasName: !!callbackDetails.name,
-        hasPhone: !!callbackDetails.phone,
-        hasEmail: !!callbackDetails.email,
+        hasName: callbackOutcome.state.captured.name,
+        hasPhone: callbackOutcome.state.captured.phone,
+        hasEmail: callbackOutcome.state.captured.email,
+        callbackCaptured: callbackOutcome.state.captured,
+        callbackAsked: callbackOutcome.state.asked,
         leadEmailAttempted: callbackDetailsAreEmailable(callbackDetails, from),
         leadEmailSent: callbackLeadEmailSent,
         replyPreview: callbackReply,
@@ -1204,7 +1370,8 @@ async function handleProcess(request: Request) {
           callbackReply,
           processUrl,
           callSid,
-          "voice_process_callback_detail_fast_path_tts"
+          "voice_process_callback_detail_fast_path_tts",
+          callbackOutcome.state
         ),
         "[micah/voice/process] callback-detail-fast-path"
       );
@@ -1293,7 +1460,15 @@ async function handleProcess(request: Request) {
       }
     );
     const sidEarly = callSid || `anon-${Date.now()}`;
-    const twiml = await buildEmptySpeechTwiML(processUrl, supabase, sidEarly, emptySpeechCount, inLeadCapture, inCallbackMode);
+    const twiml = await buildEmptySpeechTwiML(
+      processUrl,
+      supabase,
+      sidEarly,
+      emptySpeechCount,
+      inLeadCapture,
+      inCallbackMode,
+      callbackFieldState
+    );
     return twimlResponse(twiml, "[micah/voice/process] empty-speech");
   }
 
@@ -1326,7 +1501,9 @@ async function handleProcess(request: Request) {
       processUrl,
       supabase,
       callSid,
-      inLeadCapture
+      inLeadCapture,
+      inCallbackMode,
+      callbackFieldState
     );
     return twimlResponse(twiml, "[micah/voice/process] no-openai-offline-fallback");
   }
@@ -1645,7 +1822,8 @@ async function handleProcess(request: Request) {
       supabase,
       callSid,
       inLeadCapture,
-      inCallbackMode
+      inCallbackMode,
+      callbackFieldState
     );
     return twimlResponse(twiml, "[micah/voice/process] ok");
   } catch (e) {
