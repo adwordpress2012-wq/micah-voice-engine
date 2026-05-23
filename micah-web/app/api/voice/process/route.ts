@@ -699,9 +699,28 @@ function callbackRequestMp3Exists(): boolean {
 function buildStaticCallbackRequestTwiML(processUrl: string, callSid: string): string {
   const gatherUrl = buildProcessUrl(processUrl, { callbackMode: true });
   const hasCommittedMp3 = callbackRequestMp3Exists();
-  const firstVerb = hasCommittedMp3
-    ? `<Play>${CALLBACK_REQUEST_MP3_URL}</Play>`
-    : `<Say voice="alice" language="en-AU">${CALLBACK_FAST_PATH_REPLY}</Say>`;
+
+  let firstVerb: string;
+  let fallbackUsed: string;
+  if (hasCommittedMp3) {
+    firstVerb = `<Play>${CALLBACK_REQUEST_MP3_URL}?v=callback-v1</Play>`;
+    fallbackUsed = "committed-mp3";
+  } else {
+    const directTtsUrl = buildMicahDirectTtsUrl(CALLBACK_FAST_PATH_REPLY);
+    if (directTtsUrl) {
+      firstVerb = `<Play>${directTtsUrl}</Play>`;
+      fallbackUsed = "direct-elevenlabs-tts";
+    } else {
+      const fallbackMp3Url = process.env.MICAH_FALLBACK_MP3_URL?.trim() || null;
+      if (fallbackMp3Url) {
+        firstVerb = `<Play>${fallbackMp3Url}</Play>`;
+        fallbackUsed = "micah-fallback-mp3-env";
+      } else {
+        firstVerb = `<Pause length="1"/>`;
+        fallbackUsed = "silent-pause";
+      }
+    }
+  }
 
   console.warn("[micah/voice/process] callback request hard static TwiML", {
     micahVoiceQA: true,
@@ -710,16 +729,16 @@ function buildStaticCallbackRequestTwiML(processUrl: string, callSid: string): s
     mp3Url: CALLBACK_REQUEST_MP3_URL,
     committedMp3Present: hasCommittedMp3,
     gatherUrl,
-    fallback: hasCommittedMp3 ? null : "Twilio <Say voice=\"alice\" language=\"en-AU\">",
+    fallbackUsed,
     pipeline:
-      "Immediate TwiML: committed public MP3 or Alice <Say> if missing, then silent callback-mode Gather. No OpenAI, dynamic ElevenLabs TTS, Supabase, or Resend.",
+      "Immediate TwiML: committed public MP3, direct ElevenLabs Aussie Micah TTS, MICAH_FALLBACK_MP3_URL, or silent <Pause>. No OpenAI, Supabase, Resend, or Twilio <Say voice='alice'>.",
   });
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     "<Response>",
     firstVerb,
-    `<Gather input="speech" action="${gatherUrl}" method="POST" language="en-AU"></Gather>`,
+    `<Gather input="speech" action="${gatherUrl}" method="POST" language="en-AU" actionOnEmptyResult="true"></Gather>`,
     `<Redirect method="POST">${gatherUrl}</Redirect>`,
     "</Response>",
   ].join("");
