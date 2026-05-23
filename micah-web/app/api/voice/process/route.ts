@@ -60,7 +60,7 @@ const DEFAULT_CALLBACK_TARGET_NAME = "Jayson";
 const CALLBACK_DETAILS_ASK =
   "Can I grab your name, mobile number, and email address?";
 function callbackFastPathReplyForName(targetName: string): string {
-  return `Sure, I'll let ${targetName} know to call you back as soon as possible. ${CALLBACK_DETAILS_ASK}`;
+  return `Sure, ${targetName} will call you back. ${CALLBACK_DETAILS_ASK}`;
 }
 const CALLBACK_FAST_PATH_REPLY = callbackFastPathReplyForName(DEFAULT_CALLBACK_TARGET_NAME);
 const CALLBACK_ONLY_PHONE_REPLY =
@@ -262,6 +262,14 @@ function detectCallbackIntent(userSpeech: string): CallbackIntentDetection {
       targetGroup: 1,
     },
     {
+      // "I want Jayson to call me" / "I'd like someone to call me back"
+      name: "want_target_to_callback",
+      pattern: new RegExp(
+        `\\b(?:i\\s+want|i(?:'d|\\s+would)\\s+like)\\s+(${CALLBACK_TARGET_PATTERN})\\s+(?:to\\s+)?${CALLBACK_VERB_PATTERN}(?:\\s+(?:me|us))?(?:\\s+back)?\\b`
+      ),
+      targetGroup: 1,
+    },
+    {
       name: "direct_callback_request",
       pattern:
         /\b(?:i\s+want|i\s+need|can\s+i\s+get|could\s+i\s+get|would\s+like|i\s+d\s+like)\s+(?:a\s+)?(?:callback|call\s+back|phone\s+call|call)\b/,
@@ -311,7 +319,7 @@ function buildCallbackIntentBlock(requestedPerson: string): string {
   return [
     "## Callback intent detected",
     `The caller is asking for ${requestedPerson} to call them back (or to speak to ${requestedPerson}).`,
-    `Standard opening reply when no details are yet collected: "Sure, I'll let ${requestedPerson} know to call you back as soon as possible. Can I grab your name, mobile number, and email address?"`,
+    `Standard opening reply when no details are yet collected: "Sure, ${requestedPerson} will call you back. Can I grab your name, mobile number, and email address?"`,
     "If some details are already collected, refer to the lead collection state block and ask only for what is still missing.",
     `If the caller says they will hold or wait: "I can't place calls on hold just yet, but I can take your details so ${requestedPerson} can follow up properly. What's your name and mobile number?"`,
     "After collecting name, mobile, and email — ask for the best time to call.",
@@ -324,6 +332,9 @@ function buildCallbackIntentBlock(requestedPerson: string): string {
 function replyIsCallbackMode(reply: string): boolean {
   const r = reply.toLowerCase();
   return (
+    // Current fast-path reply: "Sure, Jayson will call you back."
+    /(?:jayson|[a-z]+)\s+will\s+call\s+you\s+back/i.test(r) ||
+    // Legacy patterns kept for backward compat with history replay
     /i'll let (?:jayson|[a-z]+) know to call you back/i.test(r) ||
     /(?:jayson|[a-z]+) can (?:follow up|call you|get back to you)/i.test(r) ||
     /take your details so (?:jayson|[a-z]+) can follow up/i.test(r)
