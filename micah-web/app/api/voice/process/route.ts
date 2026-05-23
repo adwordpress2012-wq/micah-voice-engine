@@ -27,7 +27,10 @@ import {
   micahReplyLooksLikeLeadWrapUp,
   sendMicahLeadSummaryEmail,
 } from "@/lib/micah/micah-lead-resend";
+import { extractLeadState } from "@/lib/micah/micah-lead-state";
+import { maskEmailAddress, resolveLeadRecipient } from "@/lib/micah/resend-config";
 import { applyMicahVoice, micahVoice, type MicahVoiceResult } from "@/lib/micah/voice-output";
+import { buildMicahDirectTtsUrl } from "@/lib/micah/direct-tts-url";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
 import { getTenantIdByInboundNumber } from "@/lib/micah/tenant-config";
@@ -53,6 +56,14 @@ const DOS_LEAD_CAPTURE_ACK =
   "Perfect, I'll pass that to Jayson and he'll follow up personally.";
 const CALLBACK_DETAILS_ASK =
   "Can I grab your name, mobile number, and email address?";
+const CALLBACK_FAST_PATH_REPLY =
+  "Sure, I'll let Jayson know to call you back as soon as possible. Can I grab your name, mobile number, and email address?";
+const CALLBACK_ONLY_PHONE_REPLY =
+  "Perfect, thanks. What's your name and email address?";
+const CALLBACK_ONLY_NAME_REPLY =
+  "Thanks. What's the best mobile number and email address?";
+const CALLBACK_NAME_PHONE_REPLY =
+  "Perfect. What's the best email address for you?";
 
 function formString(form: FormData, key: string): string {
   const v = form.get(key);
@@ -307,6 +318,151 @@ function demoStaticAnswerForSpeech(userSpeech: string): DemoStaticAnswer | null 
   return null;
 }
 
+function isCallbackRequestFastPathSpeech(userSpeech: string): boolean {
+  const speech = normaliseSpeechForIntent(userSpeech).replace(/\bjason\b/g, "jayson");
+  if (!speech) return false;
+
+  return [
+    /\bjayson\s+(?:please\s+)?(?:call|ring|phone)\s+me(?:\s+back)?\b/,
+    /\bcan\s+jayson\s+(?:please\s+)?(?:call|ring|phone)\s+me(?:\s+back)?\b/,
+    /\bcan\s+someone\s+(?:please\s+)?(?:call|ring|phone)\s+me\s+back\b/,
+    /\bcan\s+i\s+(?:please\s+)?(?:speak|talk)\s+(?:to|with)\s+jayson\b/,
+    /\bget\s+jayson\s+to\s+(?:call|ring|phone)\s+me(?:\s+back)?\b/,
+    /\bcall\s+me\s+back\b/,
+  ].some((pattern) => pattern.test(speech));
+}
+
+type CallbackDetails = {
+  name: string | null;
+  phone: string | null;
+  email: string | null;
+};
+
+function titleCaseName(name: string): string {
+  return name
+    .trim()
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function cleanCallerName(rawName: string | null | undefined): string | null {
+  const cleaned = rawName
+    ?.replace(/\b(?:my|phone|mobile|number|email|address|is|are|and|the|best|contact)\b.*$/i, "")
+    .replace(/[^a-zA-Z\s'-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return null;
+  if (cleaned.length < 2 || cleaned.length > 80) return null;
+  if (/\b(?:jayson|jason|someone|callback|call|ring|phone|email|mobile|number)\b/i.test(cleaned)) {
+    return null;
+  }
+  if (/\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/i.test(cleaned)) {
+    return null;
+  }
+  const words = cleaned.split(/\s+/);
+  if (words.length > 4) return null;
+  return titleCaseName(cleaned);
+}
+
+function extractCallbackEmail(userSpeech: string): string | null {
+  const direct = userSpeech.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0];
+  if (direct) return direct;
+
+  const spoken = userSpeech
+    .toLowerCase()
+    .replace(/\s+at\s+/g, "@")
+    .replace(/\s+dot\s+/g, ".")
+    .replace(/\s+/g, "");
+  const email = spoken.match(/\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/)?.[0];
+  return email ?? null;
+}
+
+function extractCallbackPhone(userSpeech: string): string | null {
+  const direct = userSpeech.match(/\b(?:\+?61|0)[2-478](?:[\s().-]?\d){8,12}\b/)?.[0];
+  if (direct) return direct.replace(/[^\d+]/g, "");
+
+  const digitWords: Record<string, string> = {
+    zero: "0",
+    oh: "0",
+    o: "0",
+    one: "1",
+    two: "2",
+    three: "3",
+    four: "4",
+    five: "5",
+    six: "6",
+    seven: "7",
+    eight: "8",
+    nine: "9",
+  };
+  const tokens = normaliseSpeechForIntent(userSpeech).split(/\s+/);
+  let best = "";
+  let current = "";
+  for (const token of tokens) {
+    const digit = digitWords[token] ?? (/^\d+$/.test(token) ? token : null);
+    if (digit) {
+      current += digit;
+      if (current.length > best.length) best = current;
+      continue;
+    }
+    current = "";
+  }
+  return best.length >= 8 && best.length <= 12 ? best : null;
+}
+
+function extractCallbackName(userSpeech: string, phone: string | null, email: string | null): string | null {
+  const named = userSpeech.match(
+    /\b(?:my name is|my name's|i am|i'm|this is|it's|it is|name is)\s+([a-zA-Z][a-zA-Z\s'-]{1,80})/i
+  )?.[1];
+  const explicit = cleanCallerName(named);
+  if (explicit) return explicit;
+
+  let remainder = userSpeech;
+  if (phone) remainder = remainder.replace(phone, " ");
+  if (email) remainder = remainder.replace(email, " ");
+  remainder = remainder
+    .replace(/\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|\d+)(?:\s+(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|\d+)){2,}\b/gi, " ")
+    .replace(/\b(?:my|phone|mobile|contact)?\s*(?:number|phone|mobile|contact)\s*(?:is|on)?\b/gi, " ")
+    .replace(/\b(?:my\s+)?email(?:\s+address)?\s*(?:is)?\b/gi, " ")
+    .replace(/\b(?:yes|yeah|yep|sure|thanks|thank you|perfect|best)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!phone && !email && !/\b(?:name|i am|i'm|this is|it's|it is)\b/i.test(userSpeech)) {
+    return cleanCallerName(remainder);
+  }
+
+  const leadingName = remainder.match(/^([a-zA-Z][a-zA-Z'-]*(?:\s+[a-zA-Z][a-zA-Z'-]*){0,3})\b/)?.[1];
+  return cleanCallerName(leadingName);
+}
+
+function extractCallbackDetails(userSpeech: string): CallbackDetails {
+  const email = extractCallbackEmail(userSpeech);
+  const phone = extractCallbackPhone(userSpeech);
+  const name = extractCallbackName(userSpeech, phone, email);
+  return { name, phone, email };
+}
+
+function callbackDetailReply(details: CallbackDetails): string | null {
+  const hasName = !!details.name;
+  const hasPhone = !!details.phone;
+  const hasEmail = !!details.email;
+
+  if (!hasName && !hasPhone && !hasEmail) return null;
+  if (hasPhone && !hasName && !hasEmail) return CALLBACK_ONLY_PHONE_REPLY;
+  if (hasName && !hasPhone && !hasEmail) return CALLBACK_ONLY_NAME_REPLY;
+  if (hasName && hasPhone && !hasEmail) return CALLBACK_NAME_PHONE_REPLY;
+  if (hasName && !hasPhone && hasEmail) return "Thanks. What's the best mobile number for you?";
+  if (!hasName && hasPhone && hasEmail) return "Perfect, thanks. What's your name?";
+  if (!hasName && !hasPhone && hasEmail) return "Thanks. What's your name and best mobile number?";
+  return DOS_LEAD_CAPTURE_ACK;
+}
+
+function callbackDetailsAreEmailable(details: CallbackDetails): boolean {
+  return !!details.phone || !!details.email;
+}
+
 function cleanCallbackTargetName(rawName: string | null | undefined): string | null {
   const name = rawName?.trim().replace(/[.,;:!?]+$/g, "");
   if (!name) return null;
@@ -525,6 +681,98 @@ function buildDemoStaticAnswerTwiML(
   return vr.toString();
 }
 
+function applyImmediateDirectMicahPlay(
+  vr: InstanceType<typeof twilio.twiml.VoiceResponse>,
+  text: string,
+  callSid: string,
+  event: string
+): void {
+  const directTtsUrl = buildMicahDirectTtsUrl(text);
+  const fallbackMp3Url = process.env.MICAH_FALLBACK_MP3_URL?.trim() || null;
+
+  console.warn("[micah/voice/process] immediate callback TwiML voice", {
+    micahVoiceQA: true,
+    event,
+    CallSid: callSid || null,
+    voiceId: MICAH_ELEVENLABS_VOICE_ID,
+    directTtsUrl: directTtsUrl ? directTtsUrl.slice(0, 180) : null,
+    fallbackMp3Url,
+    textPreview: text.slice(0, 160),
+    pipeline:
+      "Immediate TwiML: signed direct ElevenLabs Aussie Micah <Play>, then MICAH_FALLBACK_MP3_URL <Play>, then silent <Pause>. No OpenAI or Supabase upload before response.",
+  });
+
+  if (directTtsUrl) {
+    applyMicahVoice(vr, { kind: "audio", url: directTtsUrl, text });
+    return;
+  }
+  if (fallbackMp3Url) {
+    applyMicahVoice(vr, { kind: "fallback-mp3", url: fallbackMp3Url, text });
+    return;
+  }
+  applyMicahVoice(vr, { kind: "silent", text });
+}
+
+function buildImmediateCallbackGatherTwiML(
+  reply: string,
+  processUrl: string,
+  callSid: string,
+  event: string
+): string {
+  const vr = new twilio.twiml.VoiceResponse();
+  const gatherUrl = buildProcessUrl(processUrl, { leadCapture: true, callbackMode: true });
+
+  applyImmediateDirectMicahPlay(vr, reply, callSid, event);
+
+  vr.gather({
+    input: ["speech"],
+    timeout: 15,
+    speechTimeout: "auto",
+    actionOnEmptyResult: true,
+    action: gatherUrl,
+    method: "POST",
+    language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
+  });
+
+  vr.redirect({ method: "POST" }, gatherUrl);
+  return vr.toString();
+}
+
+async function sendCallbackDetailLeadEmail(params: {
+  callSid: string;
+  callerNumber: string;
+  userSpeech: string;
+  micahReply: string;
+  details: CallbackDetails;
+}): Promise<boolean> {
+  console.log("[micah/voice/process] sending callback detail lead email", {
+    micahVoiceQA: true,
+    event: "voice_process_callback_detail_email_start",
+    CallSid: params.callSid || null,
+    hasName: !!params.details.name,
+    hasPhone: !!params.details.phone,
+    hasEmail: !!params.details.email,
+    notifyRecipientMask: maskEmailAddress(resolveLeadRecipient()),
+  });
+
+  return sendMicahLeadSummaryEmail({
+    callSid: params.callSid,
+    callerNumber: params.callerNumber,
+    transcriptSnippet: [
+      "Caller: Requested a callback for Jayson.",
+      `Micah: ${CALLBACK_FAST_PATH_REPLY}`,
+      `Caller: ${params.userSpeech}`,
+    ].join("\n"),
+    micahReply: params.micahReply,
+    timestamp: new Date().toISOString(),
+    turns: [
+      { role: "user", content: "Requested a callback for Jayson." },
+      { role: "assistant", content: CALLBACK_FAST_PATH_REPLY },
+      { role: "user", content: params.userSpeech },
+    ],
+  });
+}
+
 function buildImmediateProcessTwiML(
   processUrl: string,
   callSid: string,
@@ -652,6 +900,81 @@ async function handleProcess(request: Request) {
     dialedTo: dialedTo || null,
     inboundRoute: classifyMicahVoiceInbound(dialedTo),
   });
+
+  if (userSpeechRaw && isCallbackRequestFastPathSpeech(userSpeechRaw)) {
+    console.warn("[micah/voice/process] callback request static fast path", {
+      micahVoiceQA: true,
+      event: "voice_process_callback_request_fast_path",
+      CallSid: callSid || null,
+      From: from || null,
+      To: dialedTo || null,
+      speechPreview: userSpeechRaw.slice(0, 200),
+      voiceId: MICAH_ELEVENLABS_VOICE_ID,
+      pipeline:
+        "Matched callback request before OpenAI, Supabase context/upload, Resend, or dynamic lead logic. Returning immediate TwiML with silent Gather.",
+    });
+    return twimlResponse(
+      buildImmediateCallbackGatherTwiML(
+        CALLBACK_FAST_PATH_REPLY,
+        processUrl,
+        callSid,
+        "voice_process_callback_request_fast_path_tts"
+      ),
+      "[micah/voice/process] callback-request-fast-path"
+    );
+  }
+
+  if (userSpeechRaw && inCallbackMode) {
+    const callbackDetails = extractCallbackDetails(userSpeechRaw);
+    const callbackReply = callbackDetailReply(callbackDetails);
+
+    if (callbackReply) {
+      let callbackLeadEmailSent = false;
+      if (callbackDetailsAreEmailable(callbackDetails)) {
+        try {
+          callbackLeadEmailSent = await withTimeout(
+            sendCallbackDetailLeadEmail({
+              callSid,
+              callerNumber: from,
+              userSpeech: userSpeechRaw,
+              micahReply: callbackReply,
+              details: callbackDetails,
+            }),
+            LEAD_EMAIL_TIMEOUT_MS,
+            "callback-detail-lead-email",
+            false
+          );
+        } catch (e) {
+          console.warn("[micah/voice/process] callback detail lead email threw; skipped:", e);
+        }
+      }
+
+      console.warn("[micah/voice/process] callback detail static fast path", {
+        micahVoiceQA: true,
+        event: "voice_process_callback_detail_fast_path",
+        CallSid: callSid || null,
+        From: from || null,
+        hasName: !!callbackDetails.name,
+        hasPhone: !!callbackDetails.phone,
+        hasEmail: !!callbackDetails.email,
+        leadEmailAttempted: callbackDetailsAreEmailable(callbackDetails),
+        leadEmailSent: callbackLeadEmailSent,
+        replyPreview: callbackReply,
+        pipeline:
+          "Callback-mode detail turn handled before OpenAI or Supabase. Resend is attempted only after caller supplied details.",
+      });
+
+      return twimlResponse(
+        buildImmediateCallbackGatherTwiML(
+          callbackReply,
+          processUrl,
+          callSid,
+          "voice_process_callback_detail_fast_path_tts"
+        ),
+        "[micah/voice/process] callback-detail-fast-path"
+      );
+    }
+  }
 
   const supabase = getServiceSupabaseOrNull();
   let history: ChatTurn[] = [];
@@ -890,15 +1213,35 @@ async function handleProcess(request: Request) {
     }
   }
 
+  const leadCaptureHeuristic = micahConversationLooksLikeCapturedLead({
+    history,
+    callerNumber: from,
+    latestCallerTurn: userSpeechRaw,
+    micahReply: aiReply,
+  });
   const capturedLead =
-    !openAiRequestFailed &&
-    (micahReplyLooksLikeLeadWrapUp(aiReply) ||
-      micahConversationLooksLikeCapturedLead({
-        history,
-        callerNumber: from,
-        latestCallerTurn: userSpeechRaw,
-        micahReply: aiReply,
-      }));
+    micahReplyLooksLikeLeadWrapUp(aiReply) || leadCaptureHeuristic;
+
+  const leadState = extractLeadState(
+    [...history, { role: "user", content: userSpeechRaw }, { role: "assistant", content: aiReply }],
+    from
+  );
+  console.log("[micah/voice/process] lead capture decision", {
+    micahVoiceQA: true,
+    event: "voice_process_lead_capture_decision",
+    deploymentCommit: process.env.VERCEL_GIT_COMMIT_SHA?.trim() || null,
+    CallSid: callSid || null,
+    speechPreview: userSpeechRaw.slice(0, 200),
+    scriptedCallbackReply: !!scriptedCallbackReply,
+    callbackMode: inCallbackMode,
+    openAiRequestFailed,
+    capturedLead,
+    leadCaptureHeuristic,
+    leadWrapUpReply: micahReplyLooksLikeLeadWrapUp(aiReply),
+    leadState,
+    leadSummaryEmailSentFromDb: leadSummaryEmailSent,
+    notifyRecipientMask: maskEmailAddress(resolveLeadRecipient()),
+  });
 
   if (capturedLead && !aiReply.includes(DOS_LEAD_CAPTURE_ACK)) {
     aiReply = DOS_LEAD_CAPTURE_ACK;
@@ -961,6 +1304,12 @@ async function handleProcess(request: Request) {
 
   if (capturedLead && !leadSummaryEmailSent) {
     let sent = false;
+    console.log("[micah/voice/process] sending DOS lead email", {
+      micahVoiceQA: true,
+      event: "voice_process_lead_email_send_start",
+      CallSid: callSid || null,
+      duplicateGuardState: leadSummaryEmailSent ? "supabase_metadata_sent" : "clear",
+    });
     try {
       sent = await withTimeout(
         sendMicahLeadSummaryEmail({
@@ -981,6 +1330,12 @@ async function handleProcess(request: Request) {
     } catch (e) {
       console.warn("[micah/voice/process] lead summary email threw; skipped:", e);
     }
+    console.log("[micah/voice/process] DOS lead email result", {
+      micahVoiceQA: true,
+      event: sent ? "voice_process_lead_email_sent" : "voice_process_lead_email_failed",
+      CallSid: callSid || null,
+      sent,
+    });
     if (sent && supabase && callSid) {
       try {
         await withTimeout(

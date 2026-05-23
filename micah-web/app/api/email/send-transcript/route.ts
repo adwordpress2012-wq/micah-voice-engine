@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { Resend } from "resend";
+import { formatResendError, resolveResendApiKey } from "@/lib/micah/resend-config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,7 +21,7 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const apiKey = resolveResendApiKey();
   const from = process.env.RESEND_FROM?.trim();
   if (!apiKey || !from) {
     return NextResponse.json(
@@ -74,8 +75,9 @@ export async function POST(req: Request): Promise<Response> {
       text,
     });
     if (error) {
-      console.error("[email/send-transcript] Resend:", error);
-      return NextResponse.json({ error: String(error) }, { status: 500 });
+      const detail = formatResendError(error);
+      console.error("[email/send-transcript] Resend:", detail);
+      return NextResponse.json({ error: detail }, { status: 500 });
     }
     return NextResponse.json({
       success: true,

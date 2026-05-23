@@ -1,4 +1,5 @@
 import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
+import { buildResendEnvDiagnostics } from "@/lib/micah/resend-config";
 import { buildVoiceEnvDiagnostics } from "@/lib/micah/voice-env-diagnostics";
 import { resolveVoiceActionBaseUrl } from "@/lib/micah-prompt";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
@@ -13,6 +14,7 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const supabase = getServiceSupabaseOrNull();
   const checks = buildVoiceEnvDiagnostics(supabase);
+  const resend = buildResendEnvDiagnostics();
 
   let gatherActionBaseUrl = "";
   try {
@@ -53,6 +55,12 @@ export async function GET(request: Request) {
         : "MICAH_FALLBACK_MP3_URL is NOT set — EL outages will produce silent <Pause>. Set this env var to a public Aussie Micah MP3 URL.",
     },
     checks,
+    resend,
+    deployment: {
+      commitSha: process.env.VERCEL_GIT_COMMIT_SHA?.trim() || null,
+      deploymentId: process.env.VERCEL_DEPLOYMENT_ID?.trim() || null,
+      vercelEnv: process.env.VERCEL_ENV?.trim() || null,
+    },
     gatherActionBaseUrl,
     voiceRoutes: {
       incomingPOST: `${gatherActionBaseUrl}/api/voice/incoming`,

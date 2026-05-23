@@ -1,5 +1,12 @@
 import { Resend } from "resend";
 import type { ChatTurn } from "@/lib/voice-session";
+import {
+  formatResendError,
+  maskEmailAddress,
+  resolveLeadRecipient,
+  resolveResendApiKey,
+  resolveResendFromAddress,
+} from "@/lib/micah/resend-config";
 
 const DOS_LEAD_SUBJECT = "New Micah Voice Lead - DOS";
 const DOS_NEXT_ACTION = "Jayson to follow up personally.";
@@ -65,13 +72,16 @@ export function micahConversationLooksLikeCapturedLead(params: {
     /\b(?:call me back|callback|ring me|contact me|follow up|speak to jayson)\b/i.test(transcript);
 
   return (
+    // Demo / DOS: send as soon as we can act — do not wait for perfect data
+    (hasName && hasPhone) ||
+    (hasPhone && hasNeed) ||
     // Classic enquiry lead: phone + (name or business) + need
     (hasPhone && (hasName || hasBusiness) && hasNeed) ||
     // Micah wrapping up and we have a phone
     (micahIsWrapping && hasPhone) ||
     // Callback lead: name + phone + email collected
     (hasName && hasPhone && hasEmail) ||
-    // Callback intent confirmed with name and phone
+    // Callback intent with name and phone (caller ID counts as phone)
     (hasCallbackRequest && hasName && hasPhone)
   );
 }
@@ -160,14 +170,6 @@ function extractCallbackPersonFromTranscript(s: string): string | null {
   return null;
 }
 
-function resolveLeadRecipient(): string | null {
-  return (
-    process.env.MICAH_VOICE_NOTIFY_EMAIL?.trim() ||
-    process.env.MICAH_TRANSCRIPT_DEFAULT_TO?.trim() ||
-    null
-  );
-}
-
 function extractLeadDetails(transcript: string): LeadDetails {
   return {
     callerName: guessNameFromTranscript(transcript),
@@ -212,27 +214,40 @@ export async function sendMicahLeadSummaryEmail(params: {
   timestamp?: string;
   turns?: ChatTurn[];
 }): Promise<boolean> {
-  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const apiKey = resolveResendApiKey();
+  const to = resolveLeadRecipient();
+  const fromAddr = resolveResendFromAddress();
+
   if (!apiKey) {
-    console.warn("[micah-lead-resend] RESEND_API_KEY unset - skip DOS lead email");
+    console.warn("[micah-lead-resend] RESEND_API_KEY unset - skip DOS lead email", {
+      micahVoiceQA: true,
+      event: "voice_lead_email_skip_no_api_key",
+      CallSid: params.callSid || null,
+    });
     return false;
   }
-  const to = resolveLeadRecipient();
   if (!to) {
     console.warn(
-      "[micah-lead-resend] MICAH_VOICE_NOTIFY_EMAIL and MICAH_TRANSCRIPT_DEFAULT_TO unset - skip DOS lead email"
+      "[micah-lead-resend] no lead recipient resolved - skip DOS lead email",
+      {
+        micahVoiceQA: true,
+        event: "voice_lead_email_skip_no_recipient",
+        CallSid: params.callSid || null,
+      }
     );
     return false;
   }
+
   const sentCallSids = getSentCallSidSet();
   if (params.callSid && sentCallSids.has(params.callSid)) {
     console.log("[micah-lead-resend] duplicate DOS lead email skipped", {
+      micahVoiceQA: true,
+      event: "voice_lead_email_duplicate_skipped",
       CallSid: params.callSid,
+      duplicateGuardState: "in_memory_call_sid_set",
     });
     return true;
   }
-
-  const fromAddr = process.env.RESEND_FROM?.trim() ?? "Micah <onboarding@resend.dev>";
   const transcript = params.turns?.length
     ? formatTranscript(params.turns, params.micahReply)
     : `${params.transcriptSnippet}\nMicah: ${params.micahReply}`.trim();
@@ -266,20 +281,53 @@ export async function sendMicahLeadSummaryEmail(params: {
     transcript || "(No transcript captured.)",
   ].join("\n");
 
+  console.log("[micah-lead-resend] Resend attempt", {
+    micahVoiceQA: true,
+    event: "voice_lead_email_resend_attempt",
+    CallSid: params.callSid || null,
+    recipientMask: maskEmailAddress(to),
+    fromPreview: fromAddr.replace(/<[^>]+>/, "<…>"),
+    subject: DOS_LEAD_SUBJECT,
+    duplicateGuardState: params.callSid && sentCallSids.has(params.callSid) ? "blocked" : "clear",
+  });
+
   try {
     const resend = new Resend(apiKey);
-    await resend.emails.send({
+    const { data, error } = await resend.emails.send({
       from: fromAddr,
       to,
       subject: DOS_LEAD_SUBJECT,
       text: body,
+    });
+    if (error) {
+      console.warn("[micah-lead-resend] Resend API error", {
+        micahVoiceQA: true,
+        event: "voice_lead_email_resend_error",
+        CallSid: params.callSid || null,
+        recipientMask: maskEmailAddress(to),
+        error: formatResendError(error),
+      });
+      return false;
+    }
+    console.log("[micah-lead-resend] Resend sent", {
+      micahVoiceQA: true,
+      event: "voice_lead_email_resend_ok",
+      CallSid: params.callSid || null,
+      recipientMask: maskEmailAddress(to),
+      resendId: data?.id ?? null,
     });
     if (params.callSid) {
       sentCallSids.add(params.callSid);
     }
     return true;
   } catch (e) {
-    console.warn("[micah-lead-resend] Resend send failed:", e);
+    console.warn("[micah-lead-resend] Resend send threw", {
+      micahVoiceQA: true,
+      event: "voice_lead_email_resend_throw",
+      CallSid: params.callSid || null,
+      recipientMask: maskEmailAddress(to),
+      error: formatResendError(e),
+    });
     return false;
   }
 }
