@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import twilio from "twilio";
-import { plainErrorTwiMLResponse, twimlResponse } from "@/lib/micah/twiml-fallback";
+import { twimlResponse } from "@/lib/micah/twiml-fallback";
 import {
   MICAH_OPENAI_OFFLINE_FALLBACK,
   clampTranscriptForModel,
@@ -42,7 +42,7 @@ export const dynamic = "force-dynamic";
 
 const MODEL =
   process.env.OPENAI_CHAT_MODEL?.trim() || MICAH_VOICE_CHAT_MODEL;
-const OPENAI_TIMEOUT_MS = 25_000;
+const OPENAI_TIMEOUT_MS = 8_000;
 const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 
 function formString(form: FormData, key: string): string {
@@ -58,6 +58,27 @@ const LISTENING_MP3_PATH = "/micah-listening.mp3";
 function publicAudioUrl(baseUrl: string, path: string): string {
   void baseUrl;
   return `${MICAH_PRODUCTION_VOICE_ORIGIN}${path}`;
+}
+
+function twilioRequestLogContext(request: Request) {
+  return {
+    micahVoiceQA: true,
+    event: "voice_process_request_context",
+    method: request.method,
+    url: request.url,
+    contentType: request.headers.get("content-type"),
+    contentLength: request.headers.get("content-length"),
+    twilioSignaturePresent: !!request.headers.get("x-twilio-signature"),
+    userAgent: request.headers.get("user-agent"),
+  };
+}
+
+function formSnapshot(form: FormData): Record<string, string> {
+  const out: Record<string, string> = {};
+  form.forEach((value, key) => {
+    out[key] = typeof value === "string" ? value.slice(0, 240) : String(value);
+  });
+  return out;
 }
 
 function staticMicahAudio(
@@ -99,6 +120,7 @@ async function buildContinuationTwiML(
     supabase,
     label: "voice-process-reply",
     ttsBudgetMs: budget,
+    allowDirectTtsFallback: false,
   });
   applyMicahVoice(vr, replyResult);
 
@@ -170,6 +192,73 @@ async function buildEmptySpeechTwiML(
   return vr.toString();
 }
 
+function buildImmediateProcessTwiML(
+  processUrl: string,
+  callSid: string,
+  reason: string
+): string {
+  const vr = new twilio.twiml.VoiceResponse();
+  const sid = callSid || `anon-${Date.now()}`;
+
+  console.warn("[micah/voice/process] immediate static TwiML fallback", {
+    micahVoiceQA: true,
+    event: "voice_process_immediate_twiml",
+    CallSid: callSid || null,
+    reason,
+    voiceId: MICAH_ELEVENLABS_VOICE_ID,
+    repeatMp3Url: publicAudioUrl(processUrl, REPEAT_MP3_PATH),
+    listeningMp3Url: publicAudioUrl(processUrl, LISTENING_MP3_PATH),
+    pipeline:
+      "No Supabase/OpenAI/ElevenLabs work in this fallback; Twilio receives XML immediately.",
+  });
+
+  applyMicahVoice(
+    vr,
+    staticMicahAudio(
+      processUrl,
+      REPEAT_MP3_PATH,
+      EMPTY_SPEECH_REPEAT_LINE,
+      `voice-process-immediate-${reason}`,
+      sid
+    )
+  );
+
+  const gather = vr.gather({
+    input: ["speech"],
+    timeout: 15,
+    speechTimeout: "auto",
+    actionOnEmptyResult: true,
+    action: processUrl,
+    method: "POST",
+    language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
+  });
+  applyMicahVoice(
+    gather,
+    staticMicahAudio(
+      processUrl,
+      LISTENING_MP3_PATH,
+      LISTENING_PROMPT_LINE,
+      `voice-process-immediate-gather-${reason}`,
+      sid
+    )
+  );
+
+  vr.redirect({ method: "POST" }, processUrl);
+  return vr.toString();
+}
+
+function immediateProcessResponse(
+  processUrl: string,
+  callSid: string,
+  reason: string,
+  logLabel: string
+) {
+  return twimlResponse(
+    buildImmediateProcessTwiML(processUrl, callSid, reason),
+    logLabel
+  );
+}
+
 export async function GET() {
   return new Response(
     "POST /api/voice/process — Micah AI reply + gather loop (ElevenLabs Aussie Micah; MICAH_FALLBACK_MP3_URL on synth failure; silent <Pause> if both unavailable — brand policy: no Polly)",
@@ -182,19 +271,39 @@ export async function GET() {
 
 async function handleProcess(request: Request) {
   const processUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/api/voice/process`;
-  const gatherOpts = { gatherContinuationUrl: processUrl };
+  console.log("[micah/voice/process] incoming request", twilioRequestLogContext(request));
 
   let form: FormData;
   try {
     form = await request.formData();
-  } catch {
-    return plainErrorTwiMLResponse(
+  } catch (e) {
+    console.error("[micah/voice/process] formData parse failed", {
+      ...twilioRequestLogContext(request),
+      event: "voice_process_form_parse_failed",
+      err: e instanceof Error ? { name: e.name, message: e.message } : String(e),
+    });
+    return immediateProcessResponse(
+      processUrl,
       "",
-      "We couldn't read this call — please try again.",
-      "[micah/voice/process] bad-form",
-      gatherOpts
+      "bad-form",
+      "[micah/voice/process] bad-form-immediate"
     );
   }
+
+  const formDump = formSnapshot(form);
+  console.log("[micah/voice/process] parsed Twilio form", {
+    micahVoiceQA: true,
+    event: "voice_process_form_keys",
+    CallSid: formDump.CallSid ?? null,
+    From: formDump.From ?? null,
+    To: formDump.To ?? null,
+    keys: Object.keys(formDump),
+    contentType: request.headers.get("content-type"),
+    confidence: formDump.Confidence ?? null,
+    hasSpeechResult: !!formDump.SpeechResult?.trim(),
+    speechResultPreview: formDump.SpeechResult?.slice(0, 120) ?? null,
+    unstableSpeechResultPreview: formDump.UnstableSpeechResult?.slice(0, 120) ?? null,
+  });
 
   console.log(
     "[DirectiveOS-Debug] Call from:",
@@ -206,12 +315,19 @@ async function handleProcess(request: Request) {
   const callSid = formString(form, "CallSid");
 
   if (!isValidTwilioVoiceWebhook(request, form)) {
-    console.warn("[micah/voice/process] invalid Twilio signature");
-    return plainErrorTwiMLResponse(
+    console.warn("[micah/voice/process] invalid Twilio signature", {
+      micahVoiceQA: true,
+      event: "voice_process_bad_signature",
+      CallSid: callSid || null,
+      keys: Object.keys(formDump),
+      contentType: request.headers.get("content-type"),
+      twilioSignaturePresent: !!request.headers.get("x-twilio-signature"),
+    });
+    return immediateProcessResponse(
+      processUrl,
       callSid,
-      "Hi — I'm having trouble verifying this call. Please hang up and redial.",
-      "[micah/voice/process] bad-signature",
-      gatherOpts
+      "bad-signature",
+      "[micah/voice/process] bad-signature-immediate"
     );
   }
 
@@ -220,11 +336,11 @@ async function handleProcess(request: Request) {
     console.error(
       "[micah/voice/process] OPENAI_API_KEY missing — add it in Vercel → Project → Settings → Environment Variables (Production), then redeploy."
     );
-    return plainErrorTwiMLResponse(
+    return immediateProcessResponse(
+      processUrl,
       callSid,
-      "Hi, it's Micah — one moment. Could you try your call again in just a minute?",
-      "[micah/voice/process] no-openai",
-      gatherOpts
+      "no-openai",
+      "[micah/voice/process] no-openai-immediate"
     );
   }
 
@@ -277,10 +393,6 @@ async function handleProcess(request: Request) {
     // audio isn't being transcribed by Twilio, so OpenAI is never invoked.
     // Log the entire form payload so we can see what Twilio actually sent
     // (Confidence, SpeechResult-vs-UnstableSpeechResult, etc.).
-    const formDump: Record<string, string> = {};
-    form.forEach((v, k) => {
-      formDump[k] = typeof v === "string" ? v.slice(0, 200) : String(v);
-    });
     console.warn(
       "[micah/voice/process] EMPTY SpeechResult — caller may have spoken but Twilio STT returned nothing. OpenAI was NOT called. This is likely the 'no brain' symptom.",
       {
@@ -406,21 +518,25 @@ async function handleProcess(request: Request) {
     }
 
     if (callSid) {
-      const saved = await saveTurnToLead(supabase, {
-        callSid,
-        callerId: from,
-        userText: userSpeechRaw,
-        assistantText: aiReply,
-        history,
-        tenantId,
-        openaiVoice: MICAH_ELEVENLABS_VOICE_ID,
-      });
-      console.log("[micah/voice/process] lead turn persistence", {
-        ok: saved.ok,
-        leadId: saved.id ?? null,
-        tenantId,
-        error: saved.error ?? null,
-      });
+      try {
+        const saved = await saveTurnToLead(supabase, {
+          callSid,
+          callerId: from,
+          userText: userSpeechRaw,
+          assistantText: aiReply,
+          history,
+          tenantId,
+          openaiVoice: MICAH_ELEVENLABS_VOICE_ID,
+        });
+        console.log("[micah/voice/process] lead turn persistence", {
+          ok: saved.ok,
+          leadId: saved.id ?? null,
+          tenantId,
+          error: saved.error ?? null,
+        });
+      } catch (e) {
+        console.warn("[micah/voice/process] lead turn persistence threw; skipped:", e);
+      }
     }
   }
   if (callSid || from) {
@@ -441,15 +557,20 @@ async function handleProcess(request: Request) {
       }));
 
   if (capturedLead && !leadSummaryEmailSent && process.env.RESEND_API_KEY?.trim()) {
-    const sent = await sendMicahLeadSummaryEmail({
-      callSid,
-      callerNumber: from,
-      transcriptSnippet: [...history, { role: "user" as const, content: userSpeechRaw }]
-        .map((m) => `${m.role === "user" ? "Caller" : "Micah"}: ${m.content}`)
-        .join("\n")
-        .slice(0, 4000),
-      micahReply: aiReply,
-    });
+    let sent = false;
+    try {
+      sent = await sendMicahLeadSummaryEmail({
+        callSid,
+        callerNumber: from,
+        transcriptSnippet: [...history, { role: "user" as const, content: userSpeechRaw }]
+          .map((m) => `${m.role === "user" ? "Caller" : "Micah"}: ${m.content}`)
+          .join("\n")
+          .slice(0, 4000),
+        micahReply: aiReply,
+      });
+    } catch (e) {
+      console.warn("[micah/voice/process] lead summary email threw; skipped:", e);
+    }
     if (sent && supabase && callSid) {
       try {
         await supabase
@@ -494,11 +615,11 @@ async function handleProcess(request: Request) {
     return twimlResponse(twiml, "[micah/voice/process] ok");
   } catch (e) {
     console.error("[micah/voice/process] twiml:", e);
-    return plainErrorTwiMLResponse(
+    return immediateProcessResponse(
+      processUrl,
       callSid,
-      sanitizeForMicahSpeech(aiReply).slice(0, 220),
-      "[micah/voice/process] twiml-error",
-      gatherOpts
+      "twiml-error",
+      "[micah/voice/process] twiml-error-immediate"
     );
   }
 }
@@ -509,11 +630,11 @@ export async function POST(request: Request) {
   } catch (e) {
     console.error("[micah/voice/process] fatal:", e);
     const processUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/api/voice/process`;
-    return plainErrorTwiMLResponse(
+    return immediateProcessResponse(
+      processUrl,
       "",
-      "Sorry — please try your call again shortly.",
-      "[micah/voice/process] fatal",
-      { gatherContinuationUrl: processUrl }
+      "fatal",
+      "[micah/voice/process] fatal-immediate"
     );
   }
 }

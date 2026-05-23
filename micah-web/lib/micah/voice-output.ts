@@ -55,13 +55,23 @@ export async function micahVoice(opts: {
   label: string;
   /** Skip synthesis and `<Play>` this URL first (e.g. `MICAH_GREETING_MP3_URL`) — instant TwiML. */
   preferredPlayUrl?: string | null;
+  /** Disable the signed `/api/voice/tts` fallback when Twilio needs fully immediate/static TwiML. */
+  allowDirectTtsFallback?: boolean;
   /**
    * When set, ElevenLabs+upload is aborted after this many ms (then static MP3 / silent).
    * Omit for full synthesis (e.g. `/api/voice/process`).
    */
   ttsBudgetMs?: number | null;
 }): Promise<MicahVoiceResult> {
-  const { text, callSid, supabase, label, preferredPlayUrl, ttsBudgetMs } = opts;
+  const {
+    text,
+    callSid,
+    supabase,
+    label,
+    preferredPlayUrl,
+    ttsBudgetMs,
+    allowDirectTtsFallback = true,
+  } = opts;
 
   const preferred = preferredPlayUrl?.trim();
   if (preferred) {
@@ -131,7 +141,7 @@ export async function micahVoice(opts: {
     });
   }
 
-  const directTtsUrl = buildMicahDirectTtsUrl(text);
+  const directTtsUrl = allowDirectTtsFallback ? buildMicahDirectTtsUrl(text) : null;
   if (directTtsUrl) {
     console.warn(`[micah/voice] ${label} fallback: direct ElevenLabs <Play> URL`, {
       micahVoiceQA: true,
