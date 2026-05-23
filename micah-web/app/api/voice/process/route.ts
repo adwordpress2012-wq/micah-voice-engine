@@ -1,4 +1,6 @@
 import OpenAI from "openai";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import twilio from "twilio";
 import { twimlResponse } from "@/lib/micah/twiml-fallback";
@@ -88,6 +90,9 @@ const PRICING_STATIC_ANSWER_LINE =
 const DOS_DEMO_ANSWER_MP3_PATH = "/micah-demo-dos-answer.mp3";
 const WEBSITES_DEMO_ANSWER_MP3_PATH = "/micah-demo-websites-answer.mp3";
 const PRICING_DEMO_ANSWER_MP3_PATH = "/micah-demo-pricing-answer.mp3";
+const CALLBACK_REQUEST_MP3_PATH = "/micah-callback-request.mp3";
+const CALLBACK_REQUEST_MP3_URL = `${MICAH_PRODUCTION_VOICE_ORIGIN}${CALLBACK_REQUEST_MP3_PATH}`;
+const CALLBACK_REQUEST_MP3_FILE = join(process.cwd(), "public", CALLBACK_REQUEST_MP3_PATH.slice(1));
 
 function publicAudioUrl(baseUrl: string, path: string): string {
   void baseUrl;
@@ -328,7 +333,9 @@ function isCallbackRequestFastPathSpeech(userSpeech: string): boolean {
     /\bcan\s+someone\s+(?:please\s+)?(?:call|ring|phone)\s+me\s+back\b/,
     /\bcan\s+i\s+(?:please\s+)?(?:speak|talk)\s+(?:to|with)\s+jayson\b/,
     /\bget\s+jayson\s+to\s+(?:call|ring|phone)\s+me(?:\s+back)?\b/,
+    /\bget\s+jayson\s+to\s+(?:call|ring|phone)\s+me\b/,
     /\bcall\s+me\s+back\b/,
+    /\bcan\s+someone\s+call\s+me\s+back\b/,
   ].some((pattern) => pattern.test(speech));
 }
 
@@ -681,6 +688,43 @@ function buildDemoStaticAnswerTwiML(
   return vr.toString();
 }
 
+function callbackRequestMp3Exists(): boolean {
+  try {
+    return existsSync(CALLBACK_REQUEST_MP3_FILE);
+  } catch {
+    return false;
+  }
+}
+
+function buildStaticCallbackRequestTwiML(processUrl: string, callSid: string): string {
+  const gatherUrl = buildProcessUrl(processUrl, { callbackMode: true });
+  const hasCommittedMp3 = callbackRequestMp3Exists();
+  const firstVerb = hasCommittedMp3
+    ? `<Play>${CALLBACK_REQUEST_MP3_URL}</Play>`
+    : `<Say voice="alice" language="en-AU">${CALLBACK_FAST_PATH_REPLY}</Say>`;
+
+  console.warn("[micah/voice/process] callback request hard static TwiML", {
+    micahVoiceQA: true,
+    event: "voice_process_callback_request_hard_static_twiml",
+    CallSid: callSid || null,
+    mp3Url: CALLBACK_REQUEST_MP3_URL,
+    committedMp3Present: hasCommittedMp3,
+    gatherUrl,
+    fallback: hasCommittedMp3 ? null : "Twilio <Say voice=\"alice\" language=\"en-AU\">",
+    pipeline:
+      "Immediate TwiML: committed public MP3 or Alice <Say> if missing, then silent callback-mode Gather. No OpenAI, dynamic ElevenLabs TTS, Supabase, or Resend.",
+  });
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    "<Response>",
+    firstVerb,
+    `<Gather input="speech" action="${gatherUrl}" method="POST" language="en-AU"></Gather>`,
+    `<Redirect method="POST">${gatherUrl}</Redirect>`,
+    "</Response>",
+  ].join("");
+}
+
 function applyImmediateDirectMicahPlay(
   vr: InstanceType<typeof twilio.twiml.VoiceResponse>,
   text: string,
@@ -910,16 +954,12 @@ async function handleProcess(request: Request) {
       To: dialedTo || null,
       speechPreview: userSpeechRaw.slice(0, 200),
       voiceId: MICAH_ELEVENLABS_VOICE_ID,
+      mp3Url: CALLBACK_REQUEST_MP3_URL,
       pipeline:
-        "Matched callback request before OpenAI, Supabase context/upload, Resend, or dynamic lead logic. Returning immediate TwiML with silent Gather.",
+        "Matched callback request before OpenAI, Supabase context/upload, Resend, or dynamic lead logic. Returning hard static MP3 TwiML with silent callback-mode Gather.",
     });
     return twimlResponse(
-      buildImmediateCallbackGatherTwiML(
-        CALLBACK_FAST_PATH_REPLY,
-        processUrl,
-        callSid,
-        "voice_process_callback_request_fast_path_tts"
-      ),
+      buildStaticCallbackRequestTwiML(processUrl, callSid),
       "[micah/voice/process] callback-request-fast-path"
     );
   }
