@@ -9,6 +9,9 @@ type LeadDetails = {
   businessName: string | null;
   businessType: string | null;
   callbackNumber: string | null;
+  callerEmail: string | null;
+  bestTimeToCall: string | null;
+  callbackPerson: string | null;
   needHelpWith: string | null;
 };
 
@@ -21,6 +24,7 @@ export function micahReplyLooksLikeLeadWrapUp(reply: string): boolean {
     r.includes("call you back shortly") ||
     r.includes("have someone call you back") ||
     r.includes("jayson will follow up personally") ||
+    r.includes("i'll pass that to jayson") ||
     (r.includes("just to confirm") && r.includes("correct"))
   );
 }
@@ -53,14 +57,26 @@ export function micahConversationLooksLikeCapturedLead(params: {
   const hasName = !!guessNameFromTranscript(transcript);
   const hasPhone =
     !!params.callerNumber || /\b(?:\+?61|0)[2-478](?:[\s().-]?\d){8,12}\b/.test(transcript);
+  const hasEmail = !!extractEmailFromText(transcript);
   const hasBusiness = looksLikeBusinessContext(transcript);
   const hasNeed = looksLikeNeedContext(transcript);
   const micahIsWrapping = micahReplyLooksLikeLeadWrapUp(params.micahReply);
+  const hasCallbackRequest =
+    /\b(?:call me back|callback|ring me|contact me|follow up|speak to jayson)\b/i.test(transcript);
 
-  return (hasPhone && (hasName || hasBusiness) && hasNeed) || (micahIsWrapping && hasPhone);
+  return (
+    // Classic enquiry lead: phone + (name or business) + need
+    (hasPhone && (hasName || hasBusiness) && hasNeed) ||
+    // Micah wrapping up and we have a phone
+    (micahIsWrapping && hasPhone) ||
+    // Callback lead: name + phone + email collected
+    (hasName && hasPhone && hasEmail) ||
+    // Callback intent confirmed with name and phone
+    (hasCallbackRequest && hasName && hasPhone)
+  );
 }
 
-function extractEmailFromText(s: string): string | null {
+export function extractEmailFromText(s: string): string | null {
   const m = s.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i);
   return m ? m[0] : null;
 }
@@ -118,6 +134,32 @@ function extractNeedFromTranscript(s: string): string | null {
   ]);
 }
 
+function extractBestTimeFromTranscript(s: string): string | null {
+  // Try named-time patterns first, then generic time keywords
+  const named = firstMatch(s, [
+    /\b(?:best time|good time|ideal time)(?: is| would be)?\s+(.{3,80})/i,
+    /\b(?:call me|reach me|get me)\s+(?:at|around|after|before|between|in the)\s+(.{3,80})/i,
+    /\b(?:available|free)\s+(?:in the|on|after|before|between)\s+(.{3,80})/i,
+  ]);
+  if (named) return named;
+  // Fallback: single-word / short phrase time indicators
+  const m = s.match(
+    /\b(any\s*time|anytime|mornings?|afternoons?|evenings?|weekdays?|weekends?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|next week|this week|later today|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i
+  );
+  return m?.[1] ?? null;
+}
+
+function extractCallbackPersonFromTranscript(s: string): string | null {
+  // Who did the caller ask to call them back?
+  const m = s.match(
+    /\b(?:can|could|get|have|ask)\s+([A-Z][a-z]+)\s+(?:call|ring|contact)\s+(?:me|us)\b/i
+  );
+  if (m?.[1] && !/^(someone|you|anyone|a|the|i|me)\b/i.test(m[1])) {
+    return m[1];
+  }
+  return null;
+}
+
 function resolveLeadRecipient(): string | null {
   return (
     process.env.MICAH_VOICE_NOTIFY_EMAIL?.trim() ||
@@ -132,6 +174,9 @@ function extractLeadDetails(transcript: string): LeadDetails {
     businessName: extractBusinessNameFromTranscript(transcript),
     businessType: extractBusinessTypeFromTranscript(transcript),
     callbackNumber: extractCallbackNumberFromTranscript(transcript),
+    callerEmail: extractEmailFromText(transcript),
+    bestTimeToCall: extractBestTimeFromTranscript(transcript),
+    callbackPerson: extractCallbackPersonFromTranscript(transcript),
     needHelpWith: extractNeedFromTranscript(transcript),
   };
 }
@@ -192,33 +237,34 @@ export async function sendMicahLeadSummaryEmail(params: {
     ? formatTranscript(params.turns, params.micahReply)
     : `${params.transcriptSnippet}\nMicah: ${params.micahReply}`.trim();
   const combined = `${transcript}\n${params.micahReply}`;
-  const email = extractEmailFromText(combined);
   const details = extractLeadDetails(combined);
   const timestamp = params.timestamp ?? new Date().toISOString();
 
   const body = [
     "New Micah Voice Lead - DOS",
     "",
-    `Caller phone from Twilio From: ${params.callerNumber || "(unknown)"}`,
-    `Best callback number provided by caller: ${
-      details.callbackNumber ?? "(not clearly provided - use Twilio From if appropriate)"
-    }`,
-    `Caller name: ${details.callerName ?? "(not clearly provided)"}`,
+    "--- CALLBACK DETAILS ---",
+    `Callback requested for:    ${details.callbackPerson ?? "Jayson"}`,
+    `Caller name:               ${details.callerName ?? "(not clearly provided)"}`,
+    `Mobile number (spoken):    ${details.callbackNumber ?? "(not clearly provided)"}`,
+    `Caller phone (Twilio From):${params.callerNumber || "(unknown)"}`,
+    `Email address:             ${details.callerEmail ?? "(not clearly provided)"}`,
+    `Best time to call:         ${details.bestTimeToCall ?? "(not specified — any time)"}`,
+    "",
+    "--- BUSINESS CONTEXT ---",
     `Business name: ${details.businessName ?? "(not clearly provided)"}`,
     `Business type: ${details.businessType ?? "(not clearly provided)"}`,
-    `What they need help with: ${details.needHelpWith ?? "(not clearly provided - see transcript)"}`,
-    email ? `Email mentioned by caller: ${email}` : "",
+    `Reason / what they need:   ${details.needHelpWith ?? "(not clearly provided — see transcript)"}`,
     "",
-    `Call SID: ${params.callSid || "(unknown)"}`,
-    `Timestamp: ${timestamp}`,
+    "--- CALL META ---",
+    `Call SID:   ${params.callSid || "(unknown)"}`,
+    `Timestamp:  ${timestamp}`,
     "",
     `Recommended next action: ${DOS_NEXT_ACTION}`,
     "",
-    "Full transcript / call history:",
+    "--- FULL TRANSCRIPT ---",
     transcript || "(No transcript captured.)",
-  ]
-    .filter((line) => line !== "")
-    .join("\n");
+  ].join("\n");
 
   try {
     const resend = new Resend(apiKey);
