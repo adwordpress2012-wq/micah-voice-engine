@@ -10,10 +10,11 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
+const TTS_FALLBACK_AUDIO_VERSION = "20260523-no-repeat-greeting";
 
 async function directTtsFallbackAudio(requestUrl: string): Promise<Uint8Array> {
   void requestUrl;
-  const fallbackUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/micah-tts-fallback.mp3`;
+  const fallbackUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/micah-tts-fallback.mp3?v=${TTS_FALLBACK_AUDIO_VERSION}`;
   const response = await fetch(fallbackUrl);
   if (!response.ok) {
     throw new Error(`fallback MP3 fetch failed: ${response.status}`);

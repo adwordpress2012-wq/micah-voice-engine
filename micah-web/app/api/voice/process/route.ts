@@ -47,6 +47,7 @@ const VOICE_PROCESS_TTS_TIMEOUT_MS = 1_500;
 const SUPABASE_CONTEXT_TIMEOUT_MS = 750;
 const SUPABASE_WRITE_TIMEOUT_MS = 750;
 const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
+const FOLLOWUP_AUDIO_VERSION = "20260523-no-repeat-greeting";
 
 function formString(form: FormData, key: string): string {
   const v = form.get(key);
@@ -60,7 +61,7 @@ const LISTENING_MP3_PATH = "/micah-listening.mp3";
 
 function publicAudioUrl(baseUrl: string, path: string): string {
   void baseUrl;
-  return `${MICAH_PRODUCTION_VOICE_ORIGIN}${path}`;
+  return `${MICAH_PRODUCTION_VOICE_ORIGIN}${path}?v=${FOLLOWUP_AUDIO_VERSION}`;
 }
 
 function twilioRequestLogContext(request: Request) {
