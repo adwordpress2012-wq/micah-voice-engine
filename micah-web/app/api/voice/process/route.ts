@@ -69,7 +69,6 @@ const WEBSITES_STATIC_ANSWER_LINE =
   "DOS builds customer enquiry systems designed to help businesses get more customers. These systems focus on enquiries, lead capture, follow-up, bookings, and notifications. If you're interested in something specific or need more details, feel free to share what you have in mind!";
 const PRICING_STATIC_ANSWER_LINE =
   "DOS offers various packages to help small businesses grow. We have solutions like the Smart Chat Widget, Micah receptionist, QuoteOS for tradies, AgentMate for real estate agents, and more. Pricing depends on the setup, but generally, we offer a setup fee plus a monthly support or subscription. If you'd like more specific details, I can take down your information, and Jayson will follow up personally. How does that sound?";
-const REPEAT_MP3_PATH = "/micah-repeat.mp3";
 const DOS_DEMO_ANSWER_MP3_PATH = "/micah-demo-dos-answer.mp3";
 const WEBSITES_DEMO_ANSWER_MP3_PATH = "/micah-demo-websites-answer.mp3";
 const PRICING_DEMO_ANSWER_MP3_PATH = "/micah-demo-pricing-answer.mp3";
@@ -309,30 +308,20 @@ async function buildEmptySpeechTwiML(
     return vr.toString();
   }
 
-  if (inLeadCapture) {
-    // Lead-capture silence: use TTS so the caller hears the exact prompt, not the generic repeat MP3.
-    const repeatResult = await micahVoice({
-      text: LEAD_CAPTURE_REPEAT_LINE,
-      callSid: sid,
-      supabase,
-      label: "voice-process-lead-capture-repeat",
-      ttsBudgetMs: Math.max(defaultElevenLabsTtsTimeoutMs(), VOICE_PROCESS_TTS_TIMEOUT_MS),
-      allowDirectTtsFallback: true,
-      allowStaticMp3Fallback: true,
-    });
-    applyMicahVoice(vr, repeatResult);
-  } else {
-    applyMicahVoice(
-      vr,
-      staticMicahAudio(
-        processUrl,
-        REPEAT_MP3_PATH,
-        EMPTY_SPEECH_REPEAT_LINE,
-        "voice-process-empty-speech-repeat",
-        sid
-      )
-    );
-  }
+  // Both paths use micahVoice TTS so the spoken text always matches the constant,
+  // regardless of what the static MP3 file on disk contains.
+  const repeatText = inLeadCapture ? LEAD_CAPTURE_REPEAT_LINE : EMPTY_SPEECH_REPEAT_LINE;
+  const repeatLabel = inLeadCapture ? "voice-process-lead-capture-repeat" : "voice-process-empty-speech-repeat";
+  const repeatResult = await micahVoice({
+    text: repeatText,
+    callSid: sid,
+    supabase,
+    label: repeatLabel,
+    ttsBudgetMs: Math.max(defaultElevenLabsTtsTimeoutMs(), VOICE_PROCESS_TTS_TIMEOUT_MS),
+    allowDirectTtsFallback: true,
+    allowStaticMp3Fallback: true,
+  });
+  applyMicahVoice(vr, repeatResult);
 
   const nextUrl = buildProcessUrl(processUrl, {
     leadCapture: inLeadCapture,
