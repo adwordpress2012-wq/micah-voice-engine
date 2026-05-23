@@ -26,11 +26,11 @@ OUT=$(curl -s -X POST "$BASE/api/voice/process" \
   -d "SpeechResult=&CallSid=CA-smoke-test&From=%2B61400000000&To=%2B61259506382")
 echo "$OUT" | grep -q "<Gather" && pass "POST /api/voice/process empty speech → silent Gather" || fail "POST /api/voice/process empty speech — unexpected: $OUT"
 
-# 4. Confirm no I'm listening in any TwiML response
+# 4. Confirm no listening filler in any TwiML response
 echo "$OUT" | grep -qi "listening" && fail "Found 'listening' in TwiML response — BAD" || pass "No 'listening' in TwiML"
 
 # 5. Static MP3 assets reachable
-for ASSET in micah-dos-sba-greeting-v2.mp3 micah-demo-dos-answer.mp3 micah-repeat.mp3; do
+for ASSET in micah-dos-sba-greeting-v2.mp3 micah-demo-dos-answer.mp3; do
   STATUS=$(curl -sI "$BASE/$ASSET" | head -1 | awk '{print $2}')
   [ "$STATUS" = "200" ] && pass "Static $ASSET (200)" || fail "Static $ASSET → HTTP $STATUS"
 done

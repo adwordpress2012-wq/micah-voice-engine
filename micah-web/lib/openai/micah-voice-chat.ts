@@ -38,7 +38,7 @@ const JAYSON_OCAMPO_HEALTH_OVERRIDE = `
 `.trim();
 
 const NO_REPEAT_GREETING_OVERRIDE = `
-The DOS Smart Business Assistant opening greeting has already been played by Twilio before this turn. Do not repeat "G'day", "you've reached", "I'm Micah", "How can I help you today?", or any opening greeting. Continue from the caller's words only. NEVER say "I'm listening" — this phrase is strictly forbidden in all replies. Answer the caller's question directly.
+The DOS Smart Business Assistant opening greeting has already been played by Twilio before this turn. Do not repeat "G'day", "you've reached", "I'm Micah", "How can I help you today?", or any opening greeting. Continue from the caller's words only. Do not use listening filler before or after answers. Answer the caller's question directly.
 `.trim();
 
 /**

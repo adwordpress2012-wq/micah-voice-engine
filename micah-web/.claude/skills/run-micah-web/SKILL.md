@@ -60,7 +60,7 @@ Dev server only; Twilio webhooks require a public URL (ngrok or deployed).
 3. Caller speech → `POST /api/voice/process` with `SpeechResult`
 4. Demo FAQ check: "What is DOS?" / websites / pricing → static MP3 (no LLM)
 5. Everything else → OpenAI → ElevenLabs TTS → `<Play>` + `<Gather>`
-6. Empty speech (silence): first time plays `micah-repeat.mp3`, second time TTS goodbye + hangup
+6. Empty speech (silence): first time plays the repeat line via Micah TTS, second time TTS goodbye + hangup
 
 ## Gotchas
 
@@ -74,6 +74,6 @@ Dev server only; Twilio webhooks require a public URL (ngrok or deployed).
 | Symptom | Fix |
 |---|---|
 | Deploy error "path does not exist" | Run `vercel --prod` from `micah-voicelab/` not `micah-web/` |
-| "I'm listening" heard on call | Run this skill — strip logic in `sanitizeForMicahSpeech` and `NO_REPEAT_GREETING_OVERRIDE` block it |
+| Listening filler heard on call | Run this skill — strip logic in `sanitizeForMicahSpeech` and the post-greeting override block it |
 | Static MP3 returns 404 | File missing from `micah-web/public/`. Check filenames against constants in `app/api/voice/process/route.ts` |
 | TypeScript errors | Run `npx tsc --noEmit` from `micah-web/` before committing |

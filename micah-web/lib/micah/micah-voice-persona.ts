@@ -2,10 +2,6 @@
  * Micah — spoken output uses ElevenLabs only in TwiML (`<Play>`); this file is LLM persona + sanitisation.
  */
 
-/** Follow-up text synthesised via ElevenLabs inside `<Gather>` after each AI turn. */
-export const MICAH_GATHER_FOLLOWUP_PROMPT =
-  "Is there anything else I can help with?";
-
 /**
  * When OpenAI chat is unavailable, callers still hear Micah stay in character.
  * This must never be an opening greeting because Twilio has already played the DOS greeting.
@@ -19,7 +15,7 @@ export function sanitizeForMicahSpeech(raw: string): string {
   t = t.replace(/\r\n/g, "\n").replace(/\n+/g, " ");
   t = t.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1");
   t = t.replace(/^["'`]+|["'`]+$/g, "");
-  // Strip "I'm listening" filler — forbidden under brand policy regardless of persona instruction.
+  // Strip the old listening filler, regardless of persona instruction.
   t = t.replace(/\bi['‘’]m\s+listening[.!,]?\s*/gi, "");
   t = t.replace(/\s{2,}/g, " ").trim();
   return t.slice(0, 1200);
