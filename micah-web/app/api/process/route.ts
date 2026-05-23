@@ -53,29 +53,15 @@ async function buildOpeningTwiml(
 
   const staticGreetingMp3 = process.env.MICAH_GREETING_MP3_URL?.trim() || null;
   let greetUrl: string | null = staticGreetingMp3;
-  let timeoutUrl: string | null = null;
   if (canUseElevenLabsTts(supabase) && supabase) {
-    const timeoutLine = "I'll hang up — feel free to call back anytime.";
-    const timeoutP = elevenLabsTtsPublicMp3UrlWithTimeout(
-      supabase,
-      timeoutLine,
-      sid,
-      budget,
-      micahElevenLabsOptsForUtterance(timeoutLine)
-    );
     if (!greetUrl) {
-      [greetUrl, timeoutUrl] = await Promise.all([
-        elevenLabsTtsPublicMp3UrlWithTimeout(
-          supabase,
-          greeting,
-          sid,
-          budget,
-          micahElevenLabsOptsForUtterance(greeting)
-        ),
-        timeoutP,
-      ]);
-    } else {
-      timeoutUrl = await timeoutP;
+      greetUrl = await elevenLabsTtsPublicMp3UrlWithTimeout(
+        supabase,
+        greeting,
+        sid,
+        budget,
+        micahElevenLabsOptsForUtterance(greeting)
+      );
     }
   }
 
@@ -85,17 +71,13 @@ async function buildOpeningTwiml(
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
+    actionOnEmptyResult: true,
     action: gatherActionUrl,
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
 
-  playOrFallbackMp3(
-    vr,
-    timeoutUrl,
-    "I'll hang up — feel free to call back anytime."
-  );
-  vr.hangup();
+  vr.redirect({ method: "POST" }, gatherActionUrl);
   return vr.toString();
 }
 
@@ -111,29 +93,17 @@ async function buildConversationTwiml(
   const budget = defaultElevenLabsTtsTimeoutMs();
 
   let mainUrl: string | null = assistantMp3Url?.trim() || null;
-  let bye: string | null = null;
 
   if (canUseElevenLabsTts(supabase) && supabase) {
-    const rest = await Promise.all([
-      mainUrl
-        ? Promise.resolve(mainUrl)
-        : elevenLabsTtsPublicMp3UrlWithTimeout(
-            supabase,
-            assistantLine,
-            sid,
-            budget,
-            micahElevenLabsOptsForUtterance(assistantLine)
-          ),
-      elevenLabsTtsPublicMp3UrlWithTimeout(
+    mainUrl =
+      mainUrl ||
+      (await elevenLabsTtsPublicMp3UrlWithTimeout(
         supabase,
-        "Thanks for calling — goodbye for now.",
+        assistantLine,
         sid,
         budget,
-        micahElevenLabsOptsForUtterance("Thanks for calling — goodbye for now.")
-      ),
-    ]);
-    mainUrl = rest[0];
-    bye = rest[1];
+        micahElevenLabsOptsForUtterance(assistantLine)
+      ));
   }
 
   playOrFallbackMp3(vr, mainUrl, assistantLine);
@@ -142,13 +112,13 @@ async function buildConversationTwiml(
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
+    actionOnEmptyResult: true,
     action: gatherActionUrl,
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
 
-  playOrFallbackMp3(vr, bye, "Thanks for calling — goodbye for now.");
-  vr.hangup();
+  vr.redirect({ method: "POST" }, gatherActionUrl);
   return vr.toString();
 }
 

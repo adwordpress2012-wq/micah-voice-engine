@@ -12,7 +12,7 @@ Protect the working live demo first. Make small, reversible changes only.
 - Protect the Aussie Micah voice.
 - Never re-enable YourAtlas, AQX, Cedar, or realtime for this Lite demo.
 - Never remove the static demo MP3 fallback.
-- Do not put "I'm listening" or any other filler audio inside normal follow-up gathers.
+- Do not put filler audio inside normal follow-up gathers.
 - After Micah answers, the next gather should listen silently.
 - Only play "Sorry, could you please repeat that?" after Twilio returns no speech, and cap it at two repeats before the DOS goodbye hangup.
 - Do not change the Twilio webhook path unless explicitly approved.

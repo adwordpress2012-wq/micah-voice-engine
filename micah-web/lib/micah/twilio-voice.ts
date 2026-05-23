@@ -22,8 +22,6 @@ import { MICAH_ELEVENLABS_VOICE_ID } from "@/lib/elevenlabs-tts";
 export const MICAH_SAY_LANGUAGE = "en-AU";
 const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 
-type TwilioVoice = import("twilio/lib/twiml/VoiceResponse");
-type GatherInstance = ReturnType<TwilioVoice["gather"]>;
 type VoiceResponseInstance = InstanceType<typeof twilio.twiml.VoiceResponse>;
 
 /** Single source of truth for the static MP3 fallback URL. */
@@ -93,34 +91,4 @@ export function playOrFallbackMp3(
     intendedText.slice(0, 200)
   );
   vr.pause({ length: 1 });
-}
-
-/** Same as {@link playOrFallbackMp3} for verbs nested under `<Gather>`. */
-export function gatherPlayOrFallbackMp3(
-  gather: GatherInstance,
-  mp3Url: string | null | undefined,
-  intendedText: string
-): void {
-  const u = mp3Url?.trim();
-  const fb = micahFallbackMp3Url();
-  logMicahVoiceQaTwilioVerb({
-    event: "play_or_fallback_gather",
-    usedPlay: !!u,
-    mp3Url,
-    staticMp3Url: fb,
-    intendedTextChars: intendedText.length,
-  });
-  if (u) {
-    gather.play(u);
-    return;
-  }
-  if (fb) {
-    gather.play(fb);
-    return;
-  }
-  console.error(
-    "[micah/twilio-voice] SILENT <Pause> in <Gather> — MICAH_FALLBACK_MP3_URL not set and ElevenLabs unavailable. Caller will hear silence. Brand policy forbids Polly. Intended text (NOT spoken):",
-    intendedText.slice(0, 200)
-  );
-  gather.pause({ length: 1 });
 }

@@ -20,7 +20,7 @@ This file records the protected working state of the Aussie Micah DOS Smart Busi
   - `/api/voice/incoming`
   - `/api/voice/process`
 - Static Aussie Micah MP3 answers are used for common demo questions.
-- Static demo answers prevent the caller from hearing only the "I'm listening" clip when dynamic audio fails.
+- Static demo answers prevent the caller from hearing only an old filler clip when dynamic audio fails.
 - The dynamic AI path can be improved later, but it is not the protected reliability path for common demo questions.
 
 ## Protected Working Demo Answers
@@ -35,7 +35,7 @@ These static answers must not be removed unless a replacement has already been t
 
 ## Known Failure That Was Fixed
 
-The caller heard the DOS greeting, asked "What is DOS?", and then heard "I'm listening" repeatedly instead of the answer.
+The caller heard the DOS greeting, asked "What is DOS?", and then heard the old filler prompt repeatedly instead of the answer.
 
 The real issue was that dynamic reply audio could fail or be skipped before the gather prompt:
 
@@ -43,13 +43,13 @@ The real issue was that dynamic reply audio could fail or be skipped before the 
 - ElevenLabs could generate or fail depending on quota.
 - Supabase upload could fail.
 - Signed `/api/voice/tts` could be too fragile for Twilio media fetch.
-- Twilio would then reach the next gather and play the "I'm listening" clip.
+- Twilio would then reach the next gather and play the old filler clip.
 
 The fix was to make common demo questions return static public Aussie Micah MP3 answer `<Play>` first, then gather again.
 
 ## Silence Handling Fix
 
-Normal follow-up gathers must listen silently after Micah answers. Do not place `micah-listening.mp3`, "I'm listening", or "Anything else I can help with?" inside the follow-up gather loop.
+Normal follow-up gathers must listen silently after Micah answers. Do not place filler audio or extra prompts inside the follow-up gather loop.
 
 When Twilio posts back with no `SpeechResult`, Micah may play:
 

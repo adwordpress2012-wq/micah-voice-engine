@@ -19,7 +19,7 @@ The working DOS SBA demo uses a locked Twilio gather flow:
 - `/api/voice/incoming` answers the call and plays the locked DOS SBA greeting.
 - `/api/voice/process` receives `SpeechResult` from Twilio.
 - Common demo questions use public static Aussie Micah MP3 answers for reliability.
-- After every answer, the next `<Gather>` listens silently. Do not add "I'm listening" audio to normal follow-up gathers.
+- After every answer, the next `<Gather>` listens silently. Do not add filler audio to normal follow-up gathers.
 - If Twilio returns no speech, play "Sorry, could you please repeat that?" at most twice, then play the DOS goodbye and hang up.
 - The dynamic AI path remains available for later improvement, but it must not be trusted as the only path for live demo FAQs.
 - Spoken output must be ElevenLabs Aussie Micah or approved static Aussie Micah MP3 audio.
@@ -31,7 +31,7 @@ The live demo must work even when dynamic services are slow, quota-limited, or u
 - Twilio timing out while waiting for OpenAI, ElevenLabs, or Supabase.
 - Supabase upload failures blocking playable audio.
 - Signed `/api/voice/tts` URLs failing during Twilio media fetch.
-- The caller hearing only the follow-up "I'm listening" clip.
+- The caller hearing only the old filler clip.
 
 Static answers are not a replacement for the AI path. They are a reliability layer for common live demo questions.
 
