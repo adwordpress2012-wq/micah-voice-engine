@@ -55,7 +55,9 @@ function formString(form: FormData, key: string): string {
 }
 
 const EMPTY_SPEECH_REPEAT_LINE = "Sorry, could you please repeat that?";
-const LISTENING_PROMPT_LINE = "I'm listening.";
+const EMPTY_SPEECH_GOODBYE_LINE =
+  "No worries, Jayson can follow up if you need help. Thanks for calling DOS.";
+const MAX_EMPTY_SPEECH_REPEATS = 2;
 const DOS_STATIC_ANSWER_LINE =
   "DOS helps small businesses get more enquiries, capture leads, automate customer communication, and improve bookings. It's designed to make things easier for businesses like yours.";
 const WEBSITES_STATIC_ANSWER_LINE =
@@ -63,7 +65,6 @@ const WEBSITES_STATIC_ANSWER_LINE =
 const PRICING_STATIC_ANSWER_LINE =
   "DOS offers various packages to help small businesses grow. We have solutions like the Smart Chat Widget, Micah receptionist, QuoteOS for tradies, AgentMate for real estate agents, and more. Pricing depends on the setup, but generally, we offer a setup fee plus a monthly support or subscription. If you'd like more specific details, I can take down your information, and Jayson will follow up personally. How does that sound?";
 const REPEAT_MP3_PATH = "/micah-repeat.mp3";
-const LISTENING_MP3_PATH = "/micah-listening.mp3";
 const DOS_DEMO_ANSWER_MP3_PATH = "/micah-demo-dos-answer.mp3";
 const WEBSITES_DEMO_ANSWER_MP3_PATH = "/micah-demo-websites-answer.mp3";
 const PRICING_DEMO_ANSWER_MP3_PATH = "/micah-demo-pricing-answer.mp3";
@@ -71,6 +72,18 @@ const PRICING_DEMO_ANSWER_MP3_PATH = "/micah-demo-pricing-answer.mp3";
 function publicAudioUrl(baseUrl: string, path: string): string {
   void baseUrl;
   return `${MICAH_PRODUCTION_VOICE_ORIGIN}${path}?v=${FOLLOWUP_AUDIO_VERSION}`;
+}
+
+function processUrlWithEmptySpeechCount(processUrl: string, count: number): string {
+  const url = new URL(processUrl);
+  url.searchParams.set("emptySpeechCount", String(count));
+  return url.toString();
+}
+
+function parseEmptySpeechCount(request: Request): number {
+  const raw = new URL(request.url).searchParams.get("emptySpeechCount");
+  const parsed = raw ? Number.parseInt(raw, 10) : 0;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, MAX_EMPTY_SPEECH_REPEATS) : 0;
 }
 
 type DemoStaticAnswer = {
@@ -203,7 +216,7 @@ function demoStaticAnswerForSpeech(userSpeech: string): DemoStaticAnswer | null 
 }
 
 /**
- * TwiML for Micah's reply then `<Gather>` — all playable lines go through {@link micahVoice} /
+ * TwiML for Micah's reply then `<Gather>` - all playable lines go through {@link micahVoice} /
  * {@link applyMicahVoice} (Aussie Micah ElevenLabs or approved MP3 fallback; `<Gather>` preserved).
  */
 async function buildContinuationTwiML(
@@ -227,7 +240,7 @@ async function buildContinuationTwiML(
   });
   applyMicahVoice(vr, replyResult);
 
-  const gather = vr.gather({
+  vr.gather({
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
@@ -236,16 +249,6 @@ async function buildContinuationTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  applyMicahVoice(
-    gather,
-    staticMicahAudio(
-      processUrl,
-      LISTENING_MP3_PATH,
-      LISTENING_PROMPT_LINE,
-      "voice-process-gather-follow",
-      sid
-    )
-  );
 
   vr.redirect({ method: "POST" }, processUrl);
   return vr.toString();
@@ -254,11 +257,26 @@ async function buildContinuationTwiML(
 async function buildEmptySpeechTwiML(
   processUrl: string,
   supabase: SupabaseClient | null,
-  callSid: string
+  callSid: string,
+  emptySpeechCount: number
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
-  void supabase;
+
+  if (emptySpeechCount >= MAX_EMPTY_SPEECH_REPEATS) {
+    const goodbyeResult = await micahVoice({
+      text: EMPTY_SPEECH_GOODBYE_LINE,
+      callSid: sid,
+      supabase,
+      label: "voice-process-empty-speech-goodbye",
+      ttsBudgetMs: Math.max(defaultElevenLabsTtsTimeoutMs(), VOICE_PROCESS_TTS_TIMEOUT_MS),
+      allowDirectTtsFallback: true,
+      allowStaticMp3Fallback: true,
+    });
+    applyMicahVoice(vr, goodbyeResult);
+    vr.hangup();
+    return vr.toString();
+  }
 
   applyMicahVoice(
     vr,
@@ -271,27 +289,17 @@ async function buildEmptySpeechTwiML(
     )
   );
 
-  const gather = vr.gather({
+  vr.gather({
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
     actionOnEmptyResult: true,
-    action: processUrl,
+    action: processUrlWithEmptySpeechCount(processUrl, emptySpeechCount + 1),
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  applyMicahVoice(
-    gather,
-    staticMicahAudio(
-      processUrl,
-      LISTENING_MP3_PATH,
-      LISTENING_PROMPT_LINE,
-      "voice-process-empty-gather",
-      sid
-    )
-  );
 
-  vr.redirect({ method: "POST" }, processUrl);
+  vr.redirect({ method: "POST" }, processUrlWithEmptySpeechCount(processUrl, emptySpeechCount + 1));
   return vr.toString();
 }
 
@@ -325,7 +333,7 @@ function buildDemoStaticAnswerTwiML(
     )
   );
 
-  const gather = vr.gather({
+  vr.gather({
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
@@ -334,16 +342,6 @@ function buildDemoStaticAnswerTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  applyMicahVoice(
-    gather,
-    staticMicahAudio(
-      processUrl,
-      LISTENING_MP3_PATH,
-      LISTENING_PROMPT_LINE,
-      `voice-process-demo-${answer.intent}-gather`,
-      sid
-    )
-  );
 
   vr.redirect({ method: "POST" }, processUrl);
   return vr.toString();
@@ -355,7 +353,6 @@ function buildImmediateProcessTwiML(
   reason: string
 ): string {
   const vr = new twilio.twiml.VoiceResponse();
-  const sid = callSid || `anon-${Date.now()}`;
 
   console.warn("[micah/voice/process] immediate static TwiML fallback", {
     micahVoiceQA: true,
@@ -363,24 +360,11 @@ function buildImmediateProcessTwiML(
     CallSid: callSid || null,
     reason,
     voiceId: MICAH_ELEVENLABS_VOICE_ID,
-    repeatMp3Url: publicAudioUrl(processUrl, REPEAT_MP3_PATH),
-    listeningMp3Url: publicAudioUrl(processUrl, LISTENING_MP3_PATH),
     pipeline:
-      "No Supabase/OpenAI/ElevenLabs work in this fallback; Twilio receives XML immediately.",
+      "No Supabase/OpenAI/ElevenLabs work in this fallback; Twilio receives a silent speech Gather immediately.",
   });
 
-  applyMicahVoice(
-    vr,
-    staticMicahAudio(
-      processUrl,
-      REPEAT_MP3_PATH,
-      EMPTY_SPEECH_REPEAT_LINE,
-      `voice-process-immediate-${reason}`,
-      sid
-    )
-  );
-
-  const gather = vr.gather({
+  vr.gather({
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
@@ -389,16 +373,6 @@ function buildImmediateProcessTwiML(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  applyMicahVoice(
-    gather,
-    staticMicahAudio(
-      processUrl,
-      LISTENING_MP3_PATH,
-      LISTENING_PROMPT_LINE,
-      `voice-process-immediate-gather-${reason}`,
-      sid
-    )
-  );
 
   vr.redirect({ method: "POST" }, processUrl);
   return vr.toString();
@@ -418,7 +392,7 @@ function immediateProcessResponse(
 
 export async function GET() {
   return new Response(
-    "POST /api/voice/process — Micah AI reply + gather loop (ElevenLabs Aussie Micah; MICAH_FALLBACK_MP3_URL on synth failure; silent <Pause> if both unavailable — brand policy: no Polly)",
+    "POST /api/voice/process - Micah AI reply + gather loop (ElevenLabs Aussie Micah; MICAH_FALLBACK_MP3_URL on synth failure; silent <Pause> if both unavailable - brand policy: no Polly)",
     {
       status: 200,
       headers: { "Content-Type": "text/plain; charset=utf-8" },
@@ -428,6 +402,7 @@ export async function GET() {
 
 async function handleProcess(request: Request) {
   const processUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/api/voice/process`;
+  const emptySpeechCount = parseEmptySpeechCount(request);
   console.log("[micah/voice/process] incoming request", twilioRequestLogContext(request));
 
   let form: FormData;
@@ -488,19 +463,6 @@ async function handleProcess(request: Request) {
     );
   }
 
-  const apiKey = process.env.OPENAI_API_KEY?.trim();
-  if (!apiKey) {
-    console.error(
-      "[micah/voice/process] OPENAI_API_KEY missing — add it in Vercel → Project → Settings → Environment Variables (Production), then redeploy."
-    );
-    return immediateProcessResponse(
-      processUrl,
-      callSid,
-      "no-openai",
-      "[micah/voice/process] no-openai-immediate"
-    );
-  }
-
   const userSpeechRaw = formString(form, "SpeechResult");
   const from = formString(form, "From");
   const dialedTo = formString(form, "To");
@@ -549,7 +511,7 @@ async function handleProcess(request: Request) {
     voiceId: MICAH_ELEVENLABS_VOICE_ID,
     fallbackMp3Configured: !!process.env.MICAH_FALLBACK_MP3_URL?.trim(),
     brandPolicy:
-      "Aussie Micah ElevenLabs OR MICAH_FALLBACK_MP3_URL only — Polly forbidden, silent <Pause> if both unavailable",
+      "Aussie Micah ElevenLabs OR MICAH_FALLBACK_MP3_URL only - Polly forbidden, silent <Pause> if both unavailable",
   });
   if (!canUseElevenLabsTts(supabase)) {
     console.error("[micah/voice/process] ElevenLabs blocked:", micahTtsBlockedReasons());
@@ -557,12 +519,12 @@ async function handleProcess(request: Request) {
 
   if (!userSpeechRaw) {
     // Twilio's <Gather speech> sent us back with no SpeechResult. This is the
-    // #1 cause of "no brain" symptoms — the call is connecting but the caller's
+    // #1 cause of "no brain" symptoms - the call is connecting but the caller's
     // audio isn't being transcribed by Twilio, so OpenAI is never invoked.
     // Log the entire form payload so we can see what Twilio actually sent
     // (Confidence, SpeechResult-vs-UnstableSpeechResult, etc.).
     console.warn(
-      "[micah/voice/process] EMPTY SpeechResult — caller may have spoken but Twilio STT returned nothing. OpenAI was NOT called. This is likely the 'no brain' symptom.",
+      "[micah/voice/process] EMPTY SpeechResult - caller may have spoken but Twilio STT returned nothing. OpenAI was NOT called. This is likely the 'no brain' symptom.",
       {
         micahVoiceQA: true,
         event: "voice_process_empty_speech",
@@ -574,16 +536,18 @@ async function handleProcess(request: Request) {
         speechResult: formDump.SpeechResult ?? null,
         unstableSpeechResult: formDump.UnstableSpeechResult ?? null,
         digits: formDump.Digits ?? null,
+        emptySpeechCount,
+        maxEmptySpeechRepeats: MAX_EMPTY_SPEECH_REPEATS,
         remediation:
           "If this fires on every turn, check Twilio Console -> phone number -> Voice -> language='en-AU' and Speech Recognition enabled. Background noise / quiet caller can also cause empty STT.",
       }
     );
     const sidEarly = callSid || `anon-${Date.now()}`;
-    const twiml = await buildEmptySpeechTwiML(processUrl, supabase, sidEarly);
+    const twiml = await buildEmptySpeechTwiML(processUrl, supabase, sidEarly, emptySpeechCount);
     return twimlResponse(twiml, "[micah/voice/process] empty-speech");
   }
 
-  console.log("[micah/voice/process] SpeechResult received — calling OpenAI", {
+  console.log("[micah/voice/process] SpeechResult received - calling OpenAI", {
     micahVoiceQA: true,
     event: "voice_process_speech_received",
     CallSid: callSid || null,
@@ -597,6 +561,21 @@ async function handleProcess(request: Request) {
       buildDemoStaticAnswerTwiML(demoStaticAnswer, processUrl, callSid),
       `[micah/voice/process] demo-${demoStaticAnswer.intent}-static-answer`
     );
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    console.error(
+      "[micah/voice/process] OPENAI_API_KEY missing - dynamic reply will use offline fallback. Static DOS demo answers still run before this check."
+    );
+    const aiReply = sanitizeForMicahSpeech(fallbackReplyForRecognisedSpeech(userSpeechRaw));
+    const twiml = await buildContinuationTwiML(
+      aiReply || MICAH_OPENAI_OFFLINE_FALLBACK,
+      processUrl,
+      supabase,
+      callSid
+    );
+    return twimlResponse(twiml, "[micah/voice/process] no-openai-offline-fallback");
   }
 
   const userSpeech = clampTranscriptForModel(userSpeechRaw);
@@ -662,11 +641,11 @@ async function handleProcess(request: Request) {
       completionTokens: aiResponse.usage?.completion_tokens ?? null,
     });
     if (!rawContent.trim()) {
-      // OpenAI returned empty content (rare but happens — content filter, weird
+      // OpenAI returned empty content (rare but happens - content filter, weird
       // model state, etc.). Fall through to the offline fallback rather than
       // silently using the static "could you repeat" line.
       console.warn(
-        "[micah/voice/process] OpenAI returned EMPTY content — switching to MICAH_OPENAI_OFFLINE_FALLBACK",
+        "[micah/voice/process] OpenAI returned EMPTY content - switching to MICAH_OPENAI_OFFLINE_FALLBACK",
         { micahVoiceQA: true, event: "voice_process_openai_empty_content", finishReason }
       );
       aiReply =

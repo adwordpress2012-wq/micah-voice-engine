@@ -18,7 +18,6 @@ import {
 import { buildMicahDirectiveProcessSystemPrompt } from "@/lib/micah/micah-directive-os-persona";
 import {
   MICAH_SAY_LANGUAGE,
-  gatherPlayOrFallbackMp3,
   playOrFallbackMp3,
 } from "@/lib/micah/twilio-voice";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -54,18 +53,9 @@ async function buildOpeningTwiml(
 
   const staticGreetingMp3 = process.env.MICAH_GREETING_MP3_URL?.trim() || null;
   let greetUrl: string | null = staticGreetingMp3;
-  let listenUrl: string | null = null;
   let timeoutUrl: string | null = null;
   if (canUseElevenLabsTts(supabase) && supabase) {
-    const listenLine = "I'm listening.";
     const timeoutLine = "I'll hang up — feel free to call back anytime.";
-    const listenP = elevenLabsTtsPublicMp3UrlWithTimeout(
-      supabase,
-      listenLine,
-      sid,
-      budget,
-      micahElevenLabsOptsForUtterance(listenLine)
-    );
     const timeoutP = elevenLabsTtsPublicMp3UrlWithTimeout(
       supabase,
       timeoutLine,
@@ -74,7 +64,7 @@ async function buildOpeningTwiml(
       micahElevenLabsOptsForUtterance(timeoutLine)
     );
     if (!greetUrl) {
-      [greetUrl, listenUrl, timeoutUrl] = await Promise.all([
+      [greetUrl, timeoutUrl] = await Promise.all([
         elevenLabsTtsPublicMp3UrlWithTimeout(
           supabase,
           greeting,
@@ -82,17 +72,16 @@ async function buildOpeningTwiml(
           budget,
           micahElevenLabsOptsForUtterance(greeting)
         ),
-        listenP,
         timeoutP,
       ]);
     } else {
-      [listenUrl, timeoutUrl] = await Promise.all([listenP, timeoutP]);
+      timeoutUrl = await timeoutP;
     }
   }
 
   playOrFallbackMp3(vr, greetUrl, greeting);
 
-  const gather = vr.gather({
+  vr.gather({
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
@@ -100,7 +89,6 @@ async function buildOpeningTwiml(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  gatherPlayOrFallbackMp3(gather, listenUrl, "I'm listening.");
 
   playOrFallbackMp3(
     vr,
@@ -123,7 +111,6 @@ async function buildConversationTwiml(
   const budget = defaultElevenLabsTtsTimeoutMs();
 
   let mainUrl: string | null = assistantMp3Url?.trim() || null;
-  let q: string | null = null;
   let bye: string | null = null;
 
   if (canUseElevenLabsTts(supabase) && supabase) {
@@ -139,13 +126,6 @@ async function buildConversationTwiml(
           ),
       elevenLabsTtsPublicMp3UrlWithTimeout(
         supabase,
-        "Anything else I can help with?",
-        sid,
-        budget,
-        micahElevenLabsOptsForUtterance("Anything else I can help with?")
-      ),
-      elevenLabsTtsPublicMp3UrlWithTimeout(
-        supabase,
         "Thanks for calling — goodbye for now.",
         sid,
         budget,
@@ -153,13 +133,12 @@ async function buildConversationTwiml(
       ),
     ]);
     mainUrl = rest[0];
-    q = rest[1];
-    bye = rest[2];
+    bye = rest[1];
   }
 
   playOrFallbackMp3(vr, mainUrl, assistantLine);
 
-  const gather = vr.gather({
+  vr.gather({
     input: ["speech"],
     timeout: 15,
     speechTimeout: "auto",
@@ -167,11 +146,6 @@ async function buildConversationTwiml(
     method: "POST",
     language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
   });
-  gatherPlayOrFallbackMp3(
-    gather,
-    q,
-    "Anything else I can help with?"
-  );
 
   playOrFallbackMp3(vr, bye, "Thanks for calling — goodbye for now.");
   vr.hangup();

@@ -9,10 +9,7 @@ import {
   micahElevenLabsOptsForUtterance,
   textSuggestsEmpatheticTts,
 } from "@/lib/micah/micah-empathy-tts";
-import {
-  MICAH_SAY_LANGUAGE,
-  gatherPlayOrFallbackMp3,
-} from "@/lib/micah/twilio-voice";
+import { MICAH_SAY_LANGUAGE } from "@/lib/micah/twilio-voice";
 import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 
 type TwilioVR = import("twilio/lib/twiml/VoiceResponse");
@@ -20,7 +17,7 @@ const MICAH_PRODUCTION_VOICE_ORIGIN = "https://micah.directiveos.com.au";
 
 export type PlainErrorTwiMLOptions = {
   /**
-   * When set, append `<Gather action="…">` so the call can continue to `/api/voice/process`
+   * When set, append `<Gather action="...">` so the call can continue to `/api/voice/process`
    * instead of ending on `<Hangup>` (avoids "Twilio went silent / stopped responding").
    */
   gatherContinuationUrl?: string;
@@ -32,7 +29,7 @@ export type PlainErrorTwiMLOptions = {
  * BRAND-STRICT POLICY: ElevenLabs Aussie Micah `<Play>` first; if synth fails,
  * `MICAH_FALLBACK_MP3_URL` `<Play>`; if that's missing, silent `<Pause>` +
  * `<Hangup>`. Polly / Twilio default voices are forbidden. The `userMessage`
- * argument is preserved for log context — it is never spoken.
+ * argument is preserved for log context - it is never spoken.
  */
 export async function plainErrorTwiMLResponse(
   callSid: string,
@@ -72,7 +69,7 @@ export async function plainErrorTwiMLResponse(
       ? `${MICAH_PRODUCTION_VOICE_ORIGIN}${configuredFallbackMp3}`
       : configuredFallbackMp3;
     if (fallbackMp3) {
-      console.warn(`[${logLabel}] ElevenLabs unavailable — MICAH_FALLBACK_MP3_URL <Play>`, {
+      console.warn(`[${logLabel}] ElevenLabs unavailable - MICAH_FALLBACK_MP3_URL <Play>`, {
         micahVoiceQA: true,
         event: "twiml_error_path_fallback_mp3",
         elevenLabsVoiceIdAttempted: MICAH_ELEVENLABS_VOICE_ID,
@@ -84,7 +81,7 @@ export async function plainErrorTwiMLResponse(
       vr.play(fallbackMp3);
     } else {
       console.error(
-        `[${logLabel}] SILENT error path — both ElevenLabs and MICAH_FALLBACK_MP3_URL are unavailable. Brand policy forbids Polly fallback. Set MICAH_FALLBACK_MP3_URL to prevent silence.`,
+        `[${logLabel}] SILENT error path - both ElevenLabs and MICAH_FALLBACK_MP3_URL are unavailable. Brand policy forbids Polly fallback. Set MICAH_FALLBACK_MP3_URL to prevent silence.`,
         {
           micahVoiceQA: true,
           event: "twiml_error_path_silent",
@@ -98,7 +95,7 @@ export async function plainErrorTwiMLResponse(
 
   const gatherUrl = options?.gatherContinuationUrl?.trim();
   if (gatherUrl) {
-    const gather = vr.gather({
+    vr.gather({
       input: ["speech"],
       timeout: 12,
       speechTimeout: "auto",
@@ -107,11 +104,6 @@ export async function plainErrorTwiMLResponse(
       method: "POST",
       language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
     });
-    gatherPlayOrFallbackMp3(
-      gather,
-      `${MICAH_PRODUCTION_VOICE_ORIGIN}/micah-listening.mp3`,
-      "Go ahead — I'm listening whenever you're ready."
-    );
   } else {
     vr.hangup();
   }
@@ -125,7 +117,9 @@ export function twimlResponse(twiml: string, logLabel: string): NextResponse {
       twiml.length > 16000 ? `${twiml.slice(0, 16000)}\n<!-- truncated for log -->` : twiml;
     console.log(`[${logLabel}] twiml length=${twiml.length} body=`, safe);
   } else {
-    console.log(`[${logLabel}] twiml length=${twiml.length} (set MICAH_DEBUG_TWIML=1 for body preview)`);
+    console.log(
+      `[${logLabel}] twiml length=${twiml.length} (set MICAH_DEBUG_TWIML=1 for body preview)`
+    );
   }
   return new NextResponse(twiml, {
     status: 200,
