@@ -56,7 +56,7 @@ function formString(form: FormData, key: string): string {
 
 const EMPTY_SPEECH_REPEAT_LINE = "Sorry, could you please repeat that?";
 const EMPTY_SPEECH_GOODBYE_LINE =
-  "No worries, Jayson can follow up if you need help. Thanks for calling DOS.";
+  "No worries. You can call back anytime, or Jayson can follow up if needed. Thanks for calling DOS.";
 const MAX_EMPTY_SPEECH_REPEATS = 2;
 // Lead-capture specific silence fallbacks — used after Micah has asked for caller details.
 const LEAD_CAPTURE_REPEAT_LINE =

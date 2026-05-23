@@ -19,6 +19,8 @@ export function sanitizeForMicahSpeech(raw: string): string {
   t = t.replace(/\r\n/g, "\n").replace(/\n+/g, " ");
   t = t.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1");
   t = t.replace(/^["'`]+|["'`]+$/g, "");
+  // Strip "I'm listening" filler — forbidden under brand policy regardless of persona instruction.
+  t = t.replace(/\bi['‘’]m\s+listening[.!,]?\s*/gi, "");
   t = t.replace(/\s{2,}/g, " ").trim();
   return t.slice(0, 1200);
 }
