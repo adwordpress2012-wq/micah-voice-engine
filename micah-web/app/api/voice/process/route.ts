@@ -57,14 +57,27 @@ function formString(form: FormData, key: string): string {
 const EMPTY_SPEECH_REPEAT_LINE = "Sorry, could you please repeat that?";
 const LISTENING_PROMPT_LINE = "I'm listening.";
 const DOS_STATIC_ANSWER_LINE =
-  "DOS helps small businesses get more enquiries, capture leads, automate customer communication, and improve bookings.";
+  "DOS helps small businesses get more enquiries, capture leads, automate customer communication, and improve bookings. It's designed to make things easier for businesses like yours.";
+const WEBSITES_STATIC_ANSWER_LINE =
+  "DOS builds customer enquiry systems designed to help businesses get more customers. These systems focus on enquiries, lead capture, follow-up, bookings, and notifications. If you're interested in something specific or need more details, feel free to share what you have in mind!";
+const PRICING_STATIC_ANSWER_LINE =
+  "DOS offers various packages to help small businesses grow. We have solutions like the Smart Chat Widget, Micah receptionist, QuoteOS for tradies, AgentMate for real estate agents, and more. Pricing depends on the setup, but generally, we offer a setup fee plus a monthly support or subscription. If you'd like more specific details, I can take down your information, and Jayson will follow up personally. How does that sound?";
 const REPEAT_MP3_PATH = "/micah-repeat.mp3";
 const LISTENING_MP3_PATH = "/micah-listening.mp3";
+const DOS_DEMO_ANSWER_MP3_PATH = "/micah-demo-dos-answer.mp3";
+const WEBSITES_DEMO_ANSWER_MP3_PATH = "/micah-demo-websites-answer.mp3";
+const PRICING_DEMO_ANSWER_MP3_PATH = "/micah-demo-pricing-answer.mp3";
 
 function publicAudioUrl(baseUrl: string, path: string): string {
   void baseUrl;
   return `${MICAH_PRODUCTION_VOICE_ORIGIN}${path}?v=${FOLLOWUP_AUDIO_VERSION}`;
 }
+
+type DemoStaticAnswer = {
+  intent: "dos" | "websites" | "pricing";
+  text: string;
+  path: string;
+};
 
 function twilioRequestLogContext(request: Request) {
   return {
@@ -138,6 +151,55 @@ function fallbackReplyForRecognisedSpeech(userSpeech: string): string {
     return DOS_STATIC_ANSWER_LINE;
   }
   return MICAH_OPENAI_OFFLINE_FALLBACK;
+}
+
+function normaliseSpeechForIntent(userSpeech: string): string {
+  return userSpeech
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function demoStaticAnswerForSpeech(userSpeech: string): DemoStaticAnswer | null {
+  const speech = normaliseSpeechForIntent(userSpeech);
+  if (!speech) return null;
+
+  const asksDos =
+    /\b(dos|dose|dues|directive os)\b/.test(speech) &&
+    /\b(what|whats|what s|tell|explain|mean|means|do|does|about)\b/.test(speech);
+  if (asksDos) {
+    return {
+      intent: "dos",
+      text: DOS_STATIC_ANSWER_LINE,
+      path: DOS_DEMO_ANSWER_MP3_PATH,
+    };
+  }
+
+  const asksWebsites =
+    /\b(website|websites|site|sites|web site|web sites)\b/.test(speech) &&
+    /\b(build|make|create|design|do|does|help|customer|enquiry|enquiries)\b/.test(speech);
+  if (asksWebsites) {
+    return {
+      intent: "websites",
+      text: WEBSITES_STATIC_ANSWER_LINE,
+      path: WEBSITES_DEMO_ANSWER_MP3_PATH,
+    };
+  }
+
+  const asksPricing =
+    /\b(price|pricing|cost|costs|quote|quotes|fee|fees|subscription|monthly|how much)\b/.test(
+      speech
+    );
+  if (asksPricing) {
+    return {
+      intent: "pricing",
+      text: PRICING_STATIC_ANSWER_LINE,
+      path: PRICING_DEMO_ANSWER_MP3_PATH,
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -225,6 +287,60 @@ async function buildEmptySpeechTwiML(
       LISTENING_MP3_PATH,
       LISTENING_PROMPT_LINE,
       "voice-process-empty-gather",
+      sid
+    )
+  );
+
+  vr.redirect({ method: "POST" }, processUrl);
+  return vr.toString();
+}
+
+function buildDemoStaticAnswerTwiML(
+  answer: DemoStaticAnswer,
+  processUrl: string,
+  callSid: string
+): string {
+  const vr = new twilio.twiml.VoiceResponse();
+  const sid = callSid || `anon-${Date.now()}`;
+
+  console.warn("[micah/voice/process] demo FAQ static answer fast path", {
+    micahVoiceQA: true,
+    event: "voice_process_demo_static_answer",
+    CallSid: callSid || null,
+    intent: answer.intent,
+    voiceId: MICAH_ELEVENLABS_VOICE_ID,
+    mp3Url: publicAudioUrl(processUrl, answer.path),
+    pipeline:
+      "Immediate TwiML: static public Aussie Micah answer MP3 first, then normal speech Gather. No OpenAI, Supabase upload, signed /api/voice/tts, Realtime, Cedar, or YourAtlas.",
+  });
+
+  applyMicahVoice(
+    vr,
+    staticMicahAudio(
+      processUrl,
+      answer.path,
+      answer.text,
+      `voice-process-demo-${answer.intent}-answer`,
+      sid
+    )
+  );
+
+  const gather = vr.gather({
+    input: ["speech"],
+    timeout: 15,
+    speechTimeout: "auto",
+    actionOnEmptyResult: true,
+    action: processUrl,
+    method: "POST",
+    language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
+  });
+  applyMicahVoice(
+    gather,
+    staticMicahAudio(
+      processUrl,
+      LISTENING_MP3_PATH,
+      LISTENING_PROMPT_LINE,
+      `voice-process-demo-${answer.intent}-gather`,
       sid
     )
   );
@@ -474,6 +590,14 @@ async function handleProcess(request: Request) {
     speechChars: userSpeechRaw.length,
     speechPreview: userSpeechRaw.slice(0, 200),
   });
+
+  const demoStaticAnswer = demoStaticAnswerForSpeech(userSpeechRaw);
+  if (demoStaticAnswer) {
+    return twimlResponse(
+      buildDemoStaticAnswerTwiML(demoStaticAnswer, processUrl, callSid),
+      `[micah/voice/process] demo-${demoStaticAnswer.intent}-static-answer`
+    );
+  }
 
   const userSpeech = clampTranscriptForModel(userSpeechRaw);
 
