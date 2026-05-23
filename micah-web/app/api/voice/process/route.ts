@@ -25,7 +25,6 @@ import {
 import {
   micahConversationLooksLikeCapturedLead,
   micahReplyLooksLikeLeadWrapUp,
-  scheduleEarlyCallbackLeadEmail,
   sendMicahLeadSummaryEmail,
   type MicahLeadEmailTier,
 } from "@/lib/micah/micah-lead-resend";
@@ -58,33 +57,51 @@ const DOS_LEAD_CAPTURE_ACK =
   "Perfect, I'll pass that to Jayson and he'll follow up personally.";
 const DEFAULT_CALLBACK_TARGET_NAME = "Jayson";
 const CALLBACK_NAME_MOBILE_ASK =
-  "What's your name and best mobile number?";
+  "Can I grab your name and mobile?";
+const WEBSITE_BUILD_LEAD_OFFER =
+  "That's something Jayson can walk you through properly, because it depends on what you need. I can grab your details and get him to call you back as soon as possible.";
 function callbackFastPathReplyForName(targetName: string): string {
   return `Sure, ${targetName} will call you back. ${CALLBACK_NAME_MOBILE_ASK}`;
 }
 const CALLBACK_FAST_PATH_REPLY = callbackFastPathReplyForName(DEFAULT_CALLBACK_TARGET_NAME);
 const CALLBACK_EMAIL_ASK =
-  "Thanks. What's the best email address for you?";
+  "Great. And your email?";
+const CALLBACK_REASON_ASK =
+  "What was the enquiry about?";
+const CALLBACK_TIME_ASK =
+  "When is the best time for Jayson to contact you?";
 const CALLBACK_ONLY_PHONE_REPLY = "Thanks. What's your name?";
 const CALLBACK_ONLY_NAME_REPLY = "Thanks. What's the best mobile number for you?";
 
-type CallbackField = "name" | "phone" | "email";
+type CallbackField = "name" | "phone" | "email" | "reason" | "time";
 type CallbackFieldFlags = Record<CallbackField, boolean>;
+type CallbackFieldValues = Record<CallbackField, string | null>;
 type CallbackFieldState = {
   captured: CallbackFieldFlags;
+  confirmed: CallbackFieldFlags;
   asked: CallbackFieldFlags;
+  values: CallbackFieldValues;
+  pendingConfirm: CallbackField | null;
 };
 
-const CALLBACK_FIELDS: CallbackField[] = ["name", "phone", "email"];
+const CALLBACK_FIELDS: CallbackField[] = ["name", "phone", "email", "reason", "time"];
+const CONFIRMABLE_CALLBACK_FIELDS = new Set<CallbackField>(["phone", "email", "time"]);
 
 function emptyCallbackFieldFlags(): CallbackFieldFlags {
-  return { name: false, phone: false, email: false };
+  return { name: false, phone: false, email: false, reason: false, time: false };
+}
+
+function emptyCallbackFieldValues(): CallbackFieldValues {
+  return { name: null, phone: null, email: null, reason: null, time: null };
 }
 
 function emptyCallbackFieldState(): CallbackFieldState {
   return {
     captured: emptyCallbackFieldFlags(),
+    confirmed: emptyCallbackFieldFlags(),
     asked: emptyCallbackFieldFlags(),
+    values: emptyCallbackFieldValues(),
+    pendingConfirm: null,
   };
 }
 
@@ -104,11 +121,26 @@ function callbackFieldFlagsFromParam(raw: string | null): CallbackFieldFlags {
   return flags;
 }
 
+function callbackFieldValuesFromUrl(url: URL): CallbackFieldValues {
+  const values = emptyCallbackFieldValues();
+  for (const field of CALLBACK_FIELDS) {
+    const value = url.searchParams.get(`callback${field[0].toUpperCase()}${field.slice(1)}`);
+    values[field] = value?.trim() || null;
+  }
+  return values;
+}
+
 function parseCallbackFieldState(request: Request): CallbackFieldState {
   const url = new URL(request.url);
+  const pendingConfirm = url.searchParams.get("callbackPendingConfirm") as CallbackField | null;
+  const parsedPendingConfirm =
+    pendingConfirm && CALLBACK_FIELDS.includes(pendingConfirm) ? pendingConfirm : null;
   return {
     captured: callbackFieldFlagsFromParam(url.searchParams.get("callbackCaptured")),
+    confirmed: callbackFieldFlagsFromParam(url.searchParams.get("callbackConfirmed")),
     asked: callbackFieldFlagsFromParam(url.searchParams.get("callbackAsked")),
+    values: callbackFieldValuesFromUrl(url),
+    pendingConfirm: parsedPendingConfirm,
   };
 }
 
@@ -118,10 +150,67 @@ function callbackFieldStateWithAsked(
 ): CallbackFieldState {
   const next = {
     captured: { ...state.captured },
+    confirmed: { ...state.confirmed },
     asked: { ...state.asked },
+    values: { ...state.values },
+    pendingConfirm: state.pendingConfirm,
   };
   for (const field of fields) next.asked[field] = true;
   return next;
+}
+
+function callbackFieldStateWithCapturedValue(
+  state: CallbackFieldState,
+  field: CallbackField,
+  value: string,
+  confirmed: boolean = !CONFIRMABLE_CALLBACK_FIELDS.has(field)
+): CallbackFieldState {
+  return {
+    captured: { ...state.captured, [field]: true },
+    confirmed: { ...state.confirmed, [field]: confirmed },
+    asked: { ...state.asked },
+    values: { ...state.values, [field]: value },
+    pendingConfirm: confirmed ? state.pendingConfirm : field,
+  };
+}
+
+function callbackFieldStateWithPendingConfirmation(
+  state: CallbackFieldState,
+  field: CallbackField | null
+): CallbackFieldState {
+  return {
+    captured: { ...state.captured },
+    confirmed: { ...state.confirmed },
+    asked: { ...state.asked },
+    values: { ...state.values },
+    pendingConfirm: field,
+  };
+}
+
+function callbackFieldStateWithConfirmed(
+  state: CallbackFieldState,
+  field: CallbackField
+): CallbackFieldState {
+  return {
+    captured: { ...state.captured, [field]: true },
+    confirmed: { ...state.confirmed, [field]: true },
+    asked: { ...state.asked },
+    values: { ...state.values },
+    pendingConfirm: state.pendingConfirm === field ? null : state.pendingConfirm,
+  };
+}
+
+function callbackFieldStateWithoutValue(
+  state: CallbackFieldState,
+  field: CallbackField
+): CallbackFieldState {
+  return {
+    captured: { ...state.captured, [field]: false },
+    confirmed: { ...state.confirmed, [field]: false },
+    asked: { ...state.asked, [field]: true },
+    values: { ...state.values, [field]: null },
+    pendingConfirm: state.pendingConfirm === field ? null : state.pendingConfirm,
+  };
 }
 
 function formString(form: FormData, key: string): string {
@@ -170,9 +259,20 @@ function buildProcessUrl(
   }
   if (opts.callbackFieldState) {
     const captured = callbackFieldFlagsToParam(opts.callbackFieldState.captured);
+    const confirmed = callbackFieldFlagsToParam(opts.callbackFieldState.confirmed);
     const asked = callbackFieldFlagsToParam(opts.callbackFieldState.asked);
     if (captured) url.searchParams.set("callbackCaptured", captured);
+    if (confirmed) url.searchParams.set("callbackConfirmed", confirmed);
     if (asked) url.searchParams.set("callbackAsked", asked);
+    if (opts.callbackFieldState.pendingConfirm) {
+      url.searchParams.set("callbackPendingConfirm", opts.callbackFieldState.pendingConfirm);
+    }
+    for (const field of CALLBACK_FIELDS) {
+      const value = opts.callbackFieldState.values[field]?.trim();
+      if (value) {
+        url.searchParams.set(`callback${field[0].toUpperCase()}${field.slice(1)}`, value);
+      }
+    }
   }
   return url.toString();
 }
@@ -442,11 +542,12 @@ function buildCallbackIntentBlock(requestedPerson: string): string {
   return [
     "## Callback intent detected",
     `The caller is asking for ${requestedPerson} to call them back (or to speak to ${requestedPerson}).`,
-    `Standard opening reply when no details are yet collected: "Sure, ${requestedPerson} will call you back. What's your name and best mobile number?"`,
+    `Standard opening reply when no details are yet collected: "Sure, ${requestedPerson} will call you back. Can I grab your name and mobile?"`,
     "If some details are already collected, refer to the lead collection state block and ask only for what is still missing.",
-    `If the caller says they will hold or wait: "I can't place calls on hold just yet, but I can take your details so ${requestedPerson} can follow up properly. What's your name and mobile number?"`,
-    "Ask for email only after name and mobile are collected: \"Thanks. What's the best email address for you?\"",
-    `Once all details are collected: "Perfect, I'll pass that to ${requestedPerson} and he'll follow up personally."`,
+    `If the caller says they will hold or wait: "I can't place calls on hold just yet, but I can take your details so ${requestedPerson} can follow up properly. Can I grab your name and mobile?"`,
+    "Ask for email only after name and mobile are collected and mobile is confirmed: \"Great. And your email?\"",
+    "Use \"is that right?\" for confirmations. Do not say \"Correct?\"",
+    `Once all details are confirmed, close warmly: "Wonderful. Nice chatting with you, [Name]. Thanks for calling DOS - we'll speak with you soon."`,
     "Keep each reply short. This is a voice call.",
   ].join("\n");
 }
@@ -563,6 +664,30 @@ function normaliseSpeechForIntent(userSpeech: string): string {
     .trim();
 }
 
+function detectsWebsiteBuildPricingIntent(userSpeech: string): boolean {
+  const speech = normaliseSpeechForIntent(userSpeech);
+  if (!speech) return false;
+
+  const hasWebsite =
+    /\b(?:website|websites|web\s+site|web\s+sites|site|sites|landing\s+page|landing\s+pages)\b/.test(
+      speech
+    );
+  if (!hasWebsite) return false;
+
+  const hasBuildIntent =
+    /\b(?:rebuild|new|custom|build|make|create|design|develop|landing|page)\b/.test(speech);
+  const hasPricingIntent =
+    /\b(?:price|pricing|cost|costs|quote|quotes|fee|fees|how\s+much|howmuch)\b/.test(speech);
+
+  return hasPricingIntent || hasBuildIntent;
+}
+
+function websiteLeadReasonForSpeech(userSpeech: string): string {
+  return /\b(?:price|pricing|cost|costs|quote|quotes|fee|fees|how\s+much)\b/i.test(userSpeech)
+    ? "Website build pricing enquiry"
+    : "Website build enquiry";
+}
+
 function demoStaticAnswerForSpeech(userSpeech: string): DemoStaticAnswer | null {
   const speech = normaliseSpeechForIntent(userSpeech);
   if (!speech) return null;
@@ -608,6 +733,8 @@ type CallbackDetails = {
   name: string | null;
   phone: string | null;
   email: string | null;
+  reason: string | null;
+  time: string | null;
 };
 
 function titleCaseName(name: string): string {
@@ -648,6 +775,17 @@ function extractCallbackEmail(userSpeech: string): string | null {
     .replace(/\s+/g, "");
   const email = spoken.match(/\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/)?.[0];
   return email ?? null;
+}
+
+function formatCallbackPhoneForSpeech(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  if (/^04\d{8}$/.test(digits)) {
+    return `${digits.slice(0, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
+  }
+  if (/^0[2378]\d{8}$/.test(digits)) {
+    return `${digits.slice(0, 2)} ${digits.slice(2, 6)} ${digits.slice(6)}`;
+  }
+  return phone.trim();
 }
 
 function extractCallbackPhone(userSpeech: string): string | null {
@@ -709,32 +847,144 @@ function extractCallbackName(userSpeech: string, phone: string | null, email: st
   return cleanCallerName(leadingName);
 }
 
+function extractCallbackReason(userSpeech: string): string | null {
+  if (detectsWebsiteBuildPricingIntent(userSpeech)) return websiteLeadReasonForSpeech(userSpeech);
+  const direct = userSpeech.match(
+    /\b(?:about|regarding|for|need|want|looking for|after|interested in|help with)\s+(.{5,100})/i
+  )?.[1];
+  const cleaned = direct
+    ?.replace(/\b(?:callback|call\s+back|call|ring|contact|jayson|jason|me|please|thanks)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned && cleaned.length >= 5) return cleaned.replace(/[.,;:!?]+$/g, "");
+  return null;
+}
+
+function extractCallbackTime(userSpeech: string): string | null {
+  const direct = userSpeech.match(
+    /\b(?:best time|good time|ideal time|call me|contact me|reach me|get me|available|free)(?:\s+is|\s+would be)?\s+(?:at|around|after|before|between|in the|on)?\s*(.{3,80})/i
+  )?.[1];
+  const cleanedDirect = direct
+    ?.replace(/\b(?:if that suits|please|thanks|thank you|yes|yeah|yep)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleanedDirect && cleanedDirect.length >= 3) {
+    return cleanedDirect.replace(/[.,;:!?]+$/g, "");
+  }
+
+  const phrase = userSpeech.match(
+    /\b(this afternoon|this morning|tonight|tomorrow morning|tomorrow afternoon|tomorrow|later today|any\s*time|anytime|mornings?|afternoons?|evenings?|weekdays?|weekends?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i
+  )?.[1];
+  return phrase?.replace(/\s+/g, " ").trim() ?? null;
+}
+
 function extractCallbackDetails(userSpeech: string): CallbackDetails {
   const email = extractCallbackEmail(userSpeech);
   const phone = extractCallbackPhone(userSpeech);
   const name = extractCallbackName(userSpeech, phone, email);
-  return { name, phone, email };
+  const reason = extractCallbackReason(userSpeech);
+  const time = extractCallbackTime(userSpeech);
+  return { name, phone, email, reason, time };
 }
 
 function callbackFieldStateWithDetails(
   previous: CallbackFieldState,
   details: CallbackDetails
 ): CallbackFieldState {
-  return {
-    captured: {
-      name: previous.captured.name || !!details.name,
-      phone: previous.captured.phone || !!details.phone,
-      email: previous.captured.email || !!details.email,
-    },
+  let next = {
+    captured: { ...previous.captured },
+    confirmed: { ...previous.confirmed },
     asked: { ...previous.asked },
+    values: { ...previous.values },
+    pendingConfirm: previous.pendingConfirm,
   };
+
+  if (details.name && !next.confirmed.name) {
+    next = callbackFieldStateWithCapturedValue(next, "name", details.name, true);
+  }
+  if (details.reason && !next.confirmed.reason) {
+    next = callbackFieldStateWithCapturedValue(next, "reason", details.reason, true);
+  }
+  if (details.phone && !next.confirmed.phone) {
+    next = callbackFieldStateWithCapturedValue(next, "phone", details.phone, false);
+  }
+  if (details.email && !next.confirmed.email) {
+    next = callbackFieldStateWithCapturedValue(next, "email", details.email, false);
+  }
+  if (details.time && !next.confirmed.time) {
+    next = callbackFieldStateWithCapturedValue(next, "time", details.time, false);
+  }
+  return next;
 }
 
 function missingCallbackNamePhoneFields(state: CallbackFieldState): CallbackField[] {
   const missing: CallbackField[] = [];
-  if (!state.captured.name) missing.push("name");
-  if (!state.captured.phone) missing.push("phone");
+  if (!state.confirmed.name) missing.push("name");
+  if (!state.confirmed.phone) missing.push("phone");
   return missing;
+}
+
+function nextUnconfirmedCallbackField(state: CallbackFieldState): CallbackField | null {
+  if (!state.confirmed.phone && state.captured.phone) return "phone";
+  if (!state.confirmed.email && state.captured.email) return "email";
+  if (!state.confirmed.time && state.captured.time) return "time";
+  return null;
+}
+
+function callbackConfirmationLine(field: CallbackField, state: CallbackFieldState): string {
+  const name = state.values.name;
+  if (field === "phone") {
+    const phone = state.values.phone ? formatCallbackPhoneForSpeech(state.values.phone) : "that mobile";
+    return name
+      ? `Thanks ${name}. Just confirming, your mobile is ${phone}, is that right?`
+      : `Thanks. Just confirming, your mobile is ${phone}, is that right?`;
+  }
+  if (field === "email") {
+    return `Thanks. Just confirming, your email is ${state.values.email ?? "that email"}, is that right?`;
+  }
+  if (field === "time") {
+    const time = state.values.time ?? "that time";
+    if (/^this afternoon$/i.test(time) && name) {
+      return `That's awesome, ${name}. I'll get Jayson to call you this afternoon, around 5pm if that suits.`;
+    }
+    return name
+      ? `That's awesome, ${name}. I'll get Jayson to call you ${time}, if that suits.`
+      : `That's awesome. I'll get Jayson to call you ${time}, if that suits.`;
+  }
+  return "Is that right?";
+}
+
+function callbackCorrectionQuestion(field: CallbackField): string {
+  if (field === "phone") return "No worries. What's the best mobile number for you?";
+  if (field === "email") return "No worries. What's the best email address for you?";
+  if (field === "time") return CALLBACK_TIME_ASK;
+  if (field === "reason") return CALLBACK_REASON_ASK;
+  return "No worries. What's your name?";
+}
+
+function isAffirmativeCallbackConfirmation(userSpeech: string): boolean {
+  return /\b(?:yes|yeah|yep|correct|right|that's right|that is right|sure|perfect|sounds good|all good|thanks)\b/i.test(
+    userSpeech
+  );
+}
+
+function isNegativeCallbackConfirmation(userSpeech: string): boolean {
+  return /\b(?:no|nope|not right|wrong|incorrect|actually)\b/i.test(userSpeech);
+}
+
+function callbackFinalLine(state: CallbackFieldState): string {
+  const name = state.values.name ?? "there";
+  return `Wonderful. Nice chatting with you, ${name}. Thanks for calling DOS - we'll speak with you soon.`;
+}
+
+function callbackLeadComplete(state: CallbackFieldState): boolean {
+  return !!(
+    state.confirmed.name &&
+    state.confirmed.phone &&
+    state.confirmed.email &&
+    state.confirmed.reason &&
+    state.confirmed.time
+  );
 }
 
 function callbackQuestionForFields(
@@ -745,7 +995,7 @@ function callbackQuestionForFields(
   const prefix = alreadyAsked ? "No worries." : "Thanks.";
 
   if (fields.length === 2 && fields.includes("name") && fields.includes("phone")) {
-    return `${prefix} What's your name and best mobile number?`;
+    return alreadyAsked ? `${prefix} ${CALLBACK_NAME_MOBILE_ASK}` : CALLBACK_NAME_MOBILE_ASK;
   }
   if (fields.length === 1 && fields[0] === "name") {
     return alreadyAsked ? "No worries. What's your name?" : CALLBACK_ONLY_PHONE_REPLY;
@@ -765,9 +1015,42 @@ function callbackQuestionForFields(
 
 function callbackDetailReply(
   details: CallbackDetails,
+  userSpeech: string,
   previousState: CallbackFieldState
-): { reply: string | null; state: CallbackFieldState } {
+): { reply: string | null; state: CallbackFieldState; completed: boolean } {
+  if (previousState.pendingConfirm) {
+    const field = previousState.pendingConfirm;
+    if (isNegativeCallbackConfirmation(userSpeech)) {
+      const state = callbackFieldStateWithoutValue(previousState, field);
+      return { reply: callbackCorrectionQuestion(field), state, completed: false };
+    }
+    if (isAffirmativeCallbackConfirmation(userSpeech)) {
+      let confirmedState = callbackFieldStateWithConfirmed(previousState, field);
+      if (callbackLeadComplete(confirmedState)) {
+        return { reply: callbackFinalLine(confirmedState), state: confirmedState, completed: true };
+      }
+      if (field === "phone" && !confirmedState.confirmed.email) {
+        confirmedState = callbackFieldStateWithAsked(confirmedState, ["email"]);
+        return { reply: CALLBACK_EMAIL_ASK, state: confirmedState, completed: false };
+      }
+      if (field === "email" && !confirmedState.confirmed.reason) {
+        confirmedState = callbackFieldStateWithAsked(confirmedState, ["reason"]);
+        return { reply: CALLBACK_REASON_ASK, state: confirmedState, completed: false };
+      }
+      if ((field === "email" || field === "reason") && !confirmedState.confirmed.time) {
+        confirmedState = callbackFieldStateWithAsked(confirmedState, ["time"]);
+        return { reply: CALLBACK_TIME_ASK, state: confirmedState, completed: false };
+      }
+    }
+  }
+
   let state = callbackFieldStateWithDetails(previousState, details);
+  const pending = nextUnconfirmedCallbackField(state);
+  if (pending) {
+    state = callbackFieldStateWithPendingConfirmation(state, pending);
+    return { reply: callbackConfirmationLine(pending, state), state, completed: false };
+  }
+
   const missingNamePhone = missingCallbackNamePhoneFields(state);
 
   if (missingNamePhone.length > 0) {
@@ -775,15 +1058,26 @@ function callbackDetailReply(
     return {
       reply: callbackQuestionForFields(missingNamePhone, previousState),
       state,
+      completed: false,
     };
   }
 
-  if (!state.captured.email) {
+  if (!state.confirmed.email) {
     state = callbackFieldStateWithAsked(state, ["email"]);
-    return { reply: CALLBACK_EMAIL_ASK, state };
+    return { reply: CALLBACK_EMAIL_ASK, state, completed: false };
   }
 
-  return { reply: DOS_LEAD_CAPTURE_ACK, state };
+  if (!state.confirmed.reason) {
+    state = callbackFieldStateWithAsked(state, ["reason"]);
+    return { reply: CALLBACK_REASON_ASK, state, completed: false };
+  }
+
+  if (!state.confirmed.time) {
+    state = callbackFieldStateWithAsked(state, ["time"]);
+    return { reply: CALLBACK_TIME_ASK, state, completed: false };
+  }
+
+  return { reply: callbackFinalLine(state), state, completed: true };
 }
 
 function callbackEmptySpeechRepeatLine(state: CallbackFieldState): string {
@@ -792,17 +1086,26 @@ function callbackEmptySpeechRepeatLine(state: CallbackFieldState): string {
     return callbackQuestionForFields(missingNamePhone, state) ??
       "No worries. What's your name and best mobile number?";
   }
-  if (!state.captured.email) {
+  if (!state.confirmed.email) {
     return "No worries. What's the best email address for you?";
   }
+  if (!state.confirmed.reason) return CALLBACK_REASON_ASK;
+  if (!state.confirmed.time) return CALLBACK_TIME_ASK;
   return EMPTY_SPEECH_REPEAT_LINE;
 }
 
 function callbackDetailsAreEmailable(
   details: CallbackDetails,
-  twilioFrom: string
+  twilioFrom: string,
+  state?: CallbackFieldState
 ): boolean {
-  return !!(twilioFrom?.trim() || details.phone || details.email);
+  return !!(
+    twilioFrom?.trim() ||
+    details.phone ||
+    details.email ||
+    state?.values.phone ||
+    state?.values.email
+  );
 }
 
 function callbackDetailEmailTier(details: CallbackDetails): MicahLeadEmailTier {
@@ -1066,6 +1369,46 @@ function buildInitialCallbackIntentTwiML(
   return vr.toString();
 }
 
+function buildWebsiteLeadOfferTwiML(
+  reply: string,
+  reason: string,
+  processUrl: string,
+  callSid: string
+): string {
+  const vr = new twilio.twiml.VoiceResponse();
+  const callbackFieldState = callbackFieldStateWithCapturedValue(
+    emptyCallbackFieldState(),
+    "reason",
+    reason,
+    true
+  );
+  const gatherUrl = buildProcessUrl(processUrl, {
+    leadCapture: true,
+    callbackMode: true,
+    callbackFieldState,
+  });
+
+  applyImmediateDirectMicahPlay(
+    vr,
+    reply,
+    callSid,
+    "voice_process_website_lead_offer_tts"
+  );
+
+  vr.gather({
+    input: ["speech"],
+    timeout: 15,
+    speechTimeout: "auto",
+    actionOnEmptyResult: true,
+    action: gatherUrl,
+    method: "POST",
+    language: MICAH_SAY_LANGUAGE as TwilioVR["GatherLanguage"],
+  });
+
+  vr.redirect({ method: "POST" }, gatherUrl);
+  return vr.toString();
+}
+
 function buildImmediateCallbackGatherTwiML(
   reply: string,
   processUrl: string,
@@ -1096,40 +1439,157 @@ function buildImmediateCallbackGatherTwiML(
   return vr.toString();
 }
 
+function buildCompletedCallbackTwiML(
+  reply: string,
+  processUrl: string,
+  callSid: string,
+  callbackFieldState: CallbackFieldState
+): string {
+  const vr = new twilio.twiml.VoiceResponse();
+  const doneUrl = buildProcessUrl(processUrl, {
+    leadCapture: true,
+    callbackMode: true,
+    callbackFieldState,
+  });
+
+  void doneUrl;
+  applyImmediateDirectMicahPlay(
+    vr,
+    reply,
+    callSid,
+    "voice_process_callback_completed_tts"
+  );
+  vr.hangup();
+  return vr.toString();
+}
+
+function callbackStateTranscript(state: CallbackFieldState): string {
+  return [
+    state.values.reason
+      ? `Caller: I need help with ${state.values.reason}.`
+      : "Caller: Requested a callback for Jayson.",
+    state.values.name ? `Caller: My name is ${state.values.name}.` : "",
+    state.values.phone ? `Caller: My mobile number is ${state.values.phone}.` : "",
+    state.values.email ? `Caller: My email address is ${state.values.email}.` : "",
+    state.values.time ? `Caller: Best time is ${state.values.time}.` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function callbackStateTurns(state: CallbackFieldState, finalReply: string): ChatTurn[] {
+  void finalReply;
+  const turns: ChatTurn[] = [];
+  if (state.values.reason) {
+    turns.push({ role: "user", content: `I need help with ${state.values.reason}.` });
+    turns.push({ role: "assistant", content: WEBSITE_BUILD_LEAD_OFFER });
+  } else {
+    turns.push({ role: "user", content: "Requested a callback for Jayson." });
+    turns.push({ role: "assistant", content: CALLBACK_FAST_PATH_REPLY });
+  }
+  if (state.values.name || state.values.phone) {
+    turns.push({
+      role: "user",
+      content: [
+        state.values.name ? `My name is ${state.values.name}.` : "",
+        state.values.phone ? `My mobile number is ${state.values.phone}.` : "",
+      ].filter(Boolean).join(" "),
+    });
+    if (state.values.phone) {
+      turns.push({ role: "assistant", content: callbackConfirmationLine("phone", state) });
+    }
+  }
+  if (state.values.email) {
+    turns.push({ role: "user", content: `My email address is ${state.values.email}.` });
+    turns.push({ role: "assistant", content: callbackConfirmationLine("email", state) });
+  }
+  if (state.values.time) {
+    turns.push({ role: "user", content: `Best time is ${state.values.time}.` });
+  }
+  return turns;
+}
+
 async function sendCallbackDetailLeadEmail(params: {
   callSid: string;
   callerNumber: string;
   userSpeech: string;
   micahReply: string;
   details: CallbackDetails;
+  state?: CallbackFieldState;
 }): Promise<boolean> {
   console.log("[micah/voice/process] sending callback detail lead email", {
     micahVoiceQA: true,
     event: "voice_process_callback_detail_email_start",
     CallSid: params.callSid || null,
-    hasName: !!params.details.name,
-    hasPhone: !!params.details.phone,
-    hasEmail: !!params.details.email,
+    hasName: !!(params.state?.values.name ?? params.details.name),
+    hasPhone: !!(params.state?.values.phone ?? params.details.phone),
+    hasEmail: !!(params.state?.values.email ?? params.details.email),
+    hasReason: !!(params.state?.values.reason ?? params.details.reason),
+    hasTime: !!(params.state?.values.time ?? params.details.time),
     notifyRecipientMask: maskEmailAddress(resolveLeadRecipient()),
   });
+
+  const transcriptSnippet = params.state
+    ? callbackStateTranscript(params.state)
+    : [
+        "Caller: Requested a callback for Jayson.",
+        `Micah: ${CALLBACK_FAST_PATH_REPLY}`,
+        `Caller: ${params.userSpeech}`,
+      ].join("\n");
+  const turns = params.state
+    ? callbackStateTurns(params.state, params.micahReply)
+    : [
+        { role: "user" as const, content: "Requested a callback for Jayson." },
+        { role: "assistant" as const, content: CALLBACK_FAST_PATH_REPLY },
+        { role: "user" as const, content: params.userSpeech },
+      ];
 
   return sendMicahLeadSummaryEmail({
     callSid: params.callSid,
     callerNumber: params.callerNumber,
-    transcriptSnippet: [
-      "Caller: Requested a callback for Jayson.",
-      `Micah: ${CALLBACK_FAST_PATH_REPLY}`,
-      `Caller: ${params.userSpeech}`,
-    ].join("\n"),
+    transcriptSnippet,
     micahReply: params.micahReply,
     timestamp: new Date().toISOString(),
-    turns: [
-      { role: "user", content: "Requested a callback for Jayson." },
-      { role: "assistant", content: CALLBACK_FAST_PATH_REPLY },
-      { role: "user", content: params.userSpeech },
-    ],
-    tier: callbackDetailEmailTier(params.details),
+    turns,
+    tier: params.state ? "full" : callbackDetailEmailTier(params.details),
   });
+}
+
+async function persistCompletedCallbackLead(params: {
+  supabase: SupabaseClient | null;
+  callSid: string;
+  callerNumber: string;
+  state: CallbackFieldState;
+  finalReply: string;
+  tenantId: string | null;
+}): Promise<void> {
+  if (!params.supabase || !params.callSid) return;
+  const turns = callbackStateTurns(params.state, params.finalReply);
+  const userText = callbackStateTranscript(params.state);
+  try {
+    const saved = await withTimeout(
+      saveTurnToLead(params.supabase, {
+        callSid: params.callSid,
+        callerId: params.callerNumber,
+        userText,
+        assistantText: params.finalReply,
+        history: turns,
+        tenantId: params.tenantId,
+        openaiVoice: MICAH_ELEVENLABS_VOICE_ID,
+      }),
+      SUPABASE_WRITE_TIMEOUT_MS,
+      "supabase-save-completed-callback-lead",
+      { ok: false, error: "timed out" }
+    );
+    console.log("[micah/voice/process] completed callback lead persistence", {
+      micahVoiceQA: true,
+      event: "voice_process_callback_completed_persist",
+      CallSid: params.callSid || null,
+      ok: saved.ok,
+      leadId: saved.id ?? null,
+      error: saved.error ?? null,
+    });
+  } catch (e) {
+    console.warn("[micah/voice/process] completed callback lead persistence threw; skipped:", e);
+  }
 }
 
 function buildImmediateProcessTwiML(
@@ -1316,12 +1776,22 @@ async function handleProcess(request: Request) {
 
   if (userSpeechRaw && inCallbackMode) {
     const callbackDetails = extractCallbackDetails(userSpeechRaw);
-    const callbackOutcome = callbackDetailReply(callbackDetails, callbackFieldState);
+    const callbackOutcome = callbackDetailReply(callbackDetails, userSpeechRaw, callbackFieldState);
     const callbackReply = callbackOutcome.reply;
 
     if (callbackReply) {
       let callbackLeadEmailSent = false;
-      if (callbackDetailsAreEmailable(callbackDetails, from)) {
+      if (callbackOutcome.completed && callbackDetailsAreEmailable(callbackDetails, from, callbackOutcome.state)) {
+        const callbackSupabase = getServiceSupabaseOrNull();
+        const callbackTenantId =
+          callbackSupabase && dialedTo
+            ? await withTimeout(
+                getTenantIdByInboundNumber(callbackSupabase, dialedTo),
+                SUPABASE_CONTEXT_TIMEOUT_MS,
+                "callback-tenant-lookup",
+                null
+              )
+            : null;
         try {
           callbackLeadEmailSent = await withTimeout(
             sendCallbackDetailLeadEmail({
@@ -1330,6 +1800,7 @@ async function handleProcess(request: Request) {
               userSpeech: userSpeechRaw,
               micahReply: callbackReply,
               details: callbackDetails,
+              state: callbackOutcome.state,
             }),
             LEAD_EMAIL_TIMEOUT_MS,
             "callback-detail-lead-email",
@@ -1338,13 +1809,13 @@ async function handleProcess(request: Request) {
         } catch (e) {
           console.warn("[micah/voice/process] callback detail lead email threw; skipped:", e);
         }
-      } else if (from?.trim()) {
-        scheduleEarlyCallbackLeadEmail({
+        await persistCompletedCallbackLead({
+          supabase: callbackSupabase,
           callSid,
           callerNumber: from,
-          latestCallerTurn: userSpeechRaw,
-          micahReply: callbackReply,
-          timeoutMs: LEAD_EMAIL_TIMEOUT_MS,
+          state: callbackOutcome.state,
+          finalReply: callbackReply,
+          tenantId: callbackTenantId,
         });
       }
 
@@ -1356,14 +1827,30 @@ async function handleProcess(request: Request) {
         hasName: callbackOutcome.state.captured.name,
         hasPhone: callbackOutcome.state.captured.phone,
         hasEmail: callbackOutcome.state.captured.email,
+        hasReason: callbackOutcome.state.captured.reason,
+        hasTime: callbackOutcome.state.captured.time,
         callbackCaptured: callbackOutcome.state.captured,
+        callbackConfirmed: callbackOutcome.state.confirmed,
         callbackAsked: callbackOutcome.state.asked,
-        leadEmailAttempted: callbackDetailsAreEmailable(callbackDetails, from),
+        callbackCompleted: callbackOutcome.completed,
+        leadEmailAttempted: callbackOutcome.completed && callbackDetailsAreEmailable(callbackDetails, from, callbackOutcome.state),
         leadEmailSent: callbackLeadEmailSent,
         replyPreview: callbackReply,
         pipeline:
-          "Callback-mode detail turn handled before OpenAI or Supabase. Resend is attempted only after caller supplied details.",
+          "Callback-mode detail turn handled before OpenAI. Resend and lead persistence run only after required details are confirmed.",
       });
+
+      if (callbackOutcome.completed) {
+        return twimlResponse(
+          buildCompletedCallbackTwiML(
+            callbackReply,
+            processUrl,
+            callSid,
+            callbackOutcome.state
+          ),
+          "[micah/voice/process] callback-completed-fast-path"
+        );
+      }
 
       return twimlResponse(
         buildImmediateCallbackGatherTwiML(
@@ -1480,6 +1967,26 @@ async function handleProcess(request: Request) {
     speechPreview: userSpeechRaw.slice(0, 200),
   });
 
+  if (!inCallbackMode && detectsWebsiteBuildPricingIntent(userSpeechRaw)) {
+    const reason = websiteLeadReasonForSpeech(userSpeechRaw);
+    console.warn("[micah/voice/process] website build/pricing lead offer fast path", {
+      micahVoiceQA: true,
+      event: "voice_process_website_lead_offer",
+      CallSid: callSid || null,
+      From: from || null,
+      To: dialedTo || null,
+      voiceId: MICAH_ELEVENLABS_VOICE_ID,
+      reason,
+      replyPreview: WEBSITE_BUILD_LEAD_OFFER,
+      pipeline:
+        "Website build/pricing question detected before static demo answer or OpenAI. No price is quoted; Micah offers Jayson callback and enters callback lead state.",
+    });
+    return twimlResponse(
+      buildWebsiteLeadOfferTwiML(WEBSITE_BUILD_LEAD_OFFER, reason, processUrl, callSid),
+      "[micah/voice/process] website-lead-offer-fast-path"
+    );
+  }
+
   const demoStaticAnswer = demoStaticAnswerForSpeech(userSpeechRaw);
   if (demoStaticAnswer) {
     return twimlResponse(
@@ -1518,18 +2025,8 @@ async function handleProcess(request: Request) {
       event: "voice_process_scripted_callback_intent",
       CallSid: callSid || null,
       replyPreview: aiReply,
-      pipeline: "Direct hardcoded callback script before OpenAI.",
+      pipeline: "Direct hardcoded callback script before OpenAI. Notification waits until required lead details are confirmed.",
     });
-    if (from?.trim() && callSid) {
-      scheduleEarlyCallbackLeadEmail({
-        callSid,
-        callerNumber: from,
-        latestCallerTurn: userSpeechRaw,
-        micahReply: aiReply,
-        turns: [...history, { role: "user", content: userSpeechRaw }],
-        timeoutMs: LEAD_EMAIL_TIMEOUT_MS,
-      });
-    }
   } else {
     const openAiApiKey = apiKey;
     if (!openAiApiKey) {

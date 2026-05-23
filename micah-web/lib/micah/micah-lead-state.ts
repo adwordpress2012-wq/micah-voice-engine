@@ -124,6 +124,7 @@ export function extractLeadState(
   if (!has_name) missing_details.push("name");
   if (!has_phone) missing_details.push("mobile number");
   if (!has_email) missing_details.push("email address");
+  if (!has_enquiry) missing_details.push("reason or enquiry type");
   if (!has_best_time) missing_details.push("best time to call");
 
   return {
@@ -181,6 +182,7 @@ export function buildLeadStatePromptBlock(
       `If caller asks what details you need, answer with ONLY what is still needed: "Just your ${state.missing_details.join(", ")}." Do not list things already collected.`
     );
     lines.push("Do not ask for any detail already marked as collected above.");
+    lines.push('Use "is that right?" for confirmations. Do not say "Correct?"');
   } else {
     lines.push(
       "All key callback details collected. Confirm them back briefly, tell the caller Jayson will follow up personally, then close warmly."

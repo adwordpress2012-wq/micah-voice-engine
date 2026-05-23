@@ -47,6 +47,16 @@ For production voice changes:
 - Preserve dynamic AI path for non-demo questions.
 - Document new static assets and why they exist.
 
+## Lead Capture State Machine
+
+- Website build, rebuild, landing page, and website pricing questions must not quote a price. Offer a Jayson callback instead.
+- Required callback fields are name, mobile number, email address, reason/enquiry type, and best callback time.
+- Track captured values separately from confirmed values.
+- Ask only for missing or unconfirmed fields; never restart name/mobile/email once captured.
+- Use "is that right?" for confirmations. Do not use "Correct?"
+- Send Resend notifications only after required details are confirmed or the conversation is ending.
+- TODO: Wire confirmed appointment, booking, or discovery interview intents into DOS Calendar only after the repo has supported calendar booking code.
+
 ## Voice Output Policy
 
 Every spoken output must be one of:

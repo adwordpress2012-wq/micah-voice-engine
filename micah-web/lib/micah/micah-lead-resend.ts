@@ -35,6 +35,7 @@ type LeadDetails = {
 /** Heuristic: Micah appears to have finished confirming details / closing warmly. */
 export function micahReplyLooksLikeLeadWrapUp(reply: string): boolean {
   const r = reply.toLowerCase();
+
   return (
     r.includes("wonderful day") ||
     r.includes("lovely chatting") ||
@@ -79,21 +80,12 @@ export function micahConversationLooksLikeCapturedLead(params: {
   const hasNeed = looksLikeNeedContext(transcript);
   const micahIsWrapping = micahReplyLooksLikeLeadWrapUp(params.micahReply);
   const hasCallbackRequest = CALLBACK_INTENT_PATTERN.test(transcript);
+  const hasActionableContact = hasName && hasPhone && hasEmail;
 
   return (
-    // Demo / DOS: send as soon as we can act — do not wait for perfect data
-    (hasName && hasPhone) ||
-    (hasPhone && hasNeed) ||
-    // Classic enquiry lead: phone + (name or business) + need
-    (hasPhone && (hasName || hasBusiness) && hasNeed) ||
-    // Micah wrapping up and we have a phone
-    (micahIsWrapping && hasPhone) ||
-    // Callback lead: name + phone + email collected
-    (hasName && hasPhone && hasEmail) ||
-    // Callback intent with name and phone (caller ID counts as phone)
-    (hasCallbackRequest && hasName && hasPhone) ||
-    // Early demo lead: callback intent + Twilio caller ID (no name required yet)
-    (hasCallbackRequest && hasPhone)
+    // Notify only after the call has actionable contact details.
+    (hasActionableContact && (hasNeed || hasCallbackRequest)) ||
+    (micahIsWrapping && hasActionableContact)
   );
 }
 
@@ -347,6 +339,15 @@ export async function sendMicahLeadSummaryEmail(params: {
 
   const body = [
     "New Micah Voice Lead - DOS",
+    "",
+    "--- AI SUMMARY ---",
+    `Caller name:          ${details.callerName ?? "(not clearly provided)"}`,
+    `Mobile:               ${details.callbackNumber ?? (params.callerNumber || "(not clearly provided)")}`,
+    `Email:                ${details.callerEmail ?? "(not clearly provided)"}`,
+    `Enquiry type:         ${details.needHelpWith ?? "(not clearly provided - see transcript)"}`,
+    `Best callback time:   ${details.bestTimeToCall ?? "(not specified - any time)"}`,
+    `Key notes:            Callback requested for ${details.callbackPerson ?? "Jayson"}. Business: ${details.businessName ?? "(not clearly provided)"}. Type: ${details.businessType ?? "(not clearly provided)"}.`,
+    `Recommended next action: ${DOS_NEXT_ACTION}`,
     "",
     "--- CALLBACK DETAILS ---",
     `Callback requested for:    ${details.callbackPerson ?? "Jayson"}`,
