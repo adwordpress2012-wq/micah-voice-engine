@@ -72,6 +72,7 @@ const CALLBACK_TIME_ASK =
   "When is the best time for Jayson to contact you?";
 const CALLBACK_ONLY_PHONE_REPLY = "Thanks. What's your name?";
 const CALLBACK_ONLY_NAME_REPLY = "Thanks. What's the best mobile number for you?";
+const CALLBACK_CONFIRMATION_DELAY_SECONDS = 1;
 
 type CallbackField = "name" | "phone" | "email" | "reason" | "time";
 type CallbackFieldFlags = Record<CallbackField, boolean>;
@@ -732,6 +733,7 @@ function demoStaticAnswerForSpeech(userSpeech: string): DemoStaticAnswer | null 
 type CallbackDetails = {
   name: string | null;
   phone: string | null;
+  phoneUnclear: boolean;
   email: string | null;
   reason: string | null;
   time: string | null;
@@ -745,9 +747,17 @@ function titleCaseName(name: string): string {
     .join(" ");
 }
 
-function cleanCallerName(rawName: string | null | undefined): string | null {
+function cleanCallerName(
+  rawName: string | null | undefined,
+  opts: { preferFirstName?: boolean; allowLikelyDanielFromDanielle?: boolean } = {}
+): string | null {
   const cleaned = rawName
-    ?.replace(/\b(?:my|phone|mobile|number|email|address|is|are|and|the|best|contact)\b.*$/i, "")
+    ?.replace(
+      /\b(?:my\s+mobile\s+number|my\s+number\s+is|my\s+phone\s+number|phone\s+number\s+is|mobile\s+number\s+is|my\s+email\s+is|email\s+address\s+is)\b.*$/i,
+      ""
+    )
+    .replace(/\b(?:my|phone|mobile|number|email|address|is|are|and|the|best|contact)\b.*$/i, "")
+    .replace(/\b(?:ok|okay|yeah|yep|yes|sure|thanks|thank\s+you)\b/gi, " ")
     .replace(/[^a-zA-Z\s'-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -759,9 +769,16 @@ function cleanCallerName(rawName: string | null | undefined): string | null {
   if (/\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)\b/i.test(cleaned)) {
     return null;
   }
-  const words = cleaned.split(/\s+/);
+  let words = cleaned.split(/\s+/);
   if (words.length > 4) return null;
-  return titleCaseName(cleaned);
+  if (opts.preferFirstName && words.length > 1) {
+    words = [words[0]];
+  }
+  let name = titleCaseName(words.join(" "));
+  if (opts.allowLikelyDanielFromDanielle && /^Danielle$/.test(name)) {
+    name = "Daniel";
+  }
+  return name;
 }
 
 function extractCallbackEmail(userSpeech: string): string | null {
@@ -778,6 +795,11 @@ function extractCallbackEmail(userSpeech: string): string | null {
 }
 
 function formatCallbackPhoneForSpeech(phone: string): string {
+  const auMobile = normaliseAustralianMobile(phone);
+  if (auMobile) {
+    const local = `0${auMobile.slice(3)}`;
+    return `${local.slice(0, 4)} ${local.slice(4, 7)} ${local.slice(7)}`;
+  }
   const digits = phone.replace(/\D/g, "");
   if (/^04\d{8}$/.test(digits)) {
     return `${digits.slice(0, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`;
@@ -788,10 +810,16 @@ function formatCallbackPhoneForSpeech(phone: string): string {
   return phone.trim();
 }
 
-function extractCallbackPhone(userSpeech: string): string | null {
-  const direct = userSpeech.match(/\b(?:\+?61|0)[2-478](?:[\s().-]?\d){8,12}\b/)?.[0];
-  if (direct) return direct.replace(/[^\d+]/g, "");
+function normaliseAustralianMobile(rawPhone: string | null | undefined): string | null {
+  const digits = rawPhone?.replace(/\D/g, "") ?? "";
+  if (/^04\d{8}$/.test(digits)) return `+61${digits.slice(1)}`;
+  if (/^4\d{8}$/.test(digits)) return `+61${digits}`;
+  if (/^614\d{8}$/.test(digits)) return `+${digits}`;
+  if (/^00614\d{8}$/.test(digits)) return `+${digits.slice(2)}`;
+  return null;
+}
 
+function callbackPhoneDigitCandidates(userSpeech: string): string[] {
   const digitWords: Record<string, string> = {
     zero: "0",
     oh: "0",
@@ -806,19 +834,38 @@ function extractCallbackPhone(userSpeech: string): string | null {
     eight: "8",
     nine: "9",
   };
+  const candidates: string[] = [];
   const tokens = normaliseSpeechForIntent(userSpeech).split(/\s+/);
-  let best = "";
   let current = "";
+
   for (const token of tokens) {
     const digit = digitWords[token] ?? (/^\d+$/.test(token) ? token : null);
     if (digit) {
       current += digit;
-      if (current.length > best.length) best = current;
+      if (current.length >= 4) candidates.push(current);
       continue;
     }
     current = "";
   }
-  return best.length >= 8 && best.length <= 12 ? best : null;
+  return candidates;
+}
+
+function extractCallbackPhone(userSpeech: string): string | null {
+  const direct = userSpeech.match(/\b(?:\+?61|0)4(?:[\s().-]?\d){8}\b/)?.[0];
+  const normalisedDirect = normaliseAustralianMobile(direct);
+  if (normalisedDirect) return normalisedDirect;
+
+  for (const candidate of callbackPhoneDigitCandidates(userSpeech)) {
+    const normalised = normaliseAustralianMobile(candidate);
+    if (normalised) return normalised;
+  }
+  return null;
+}
+
+function callbackPhoneLooksAttempted(userSpeech: string): boolean {
+  const speech = normaliseSpeechForIntent(userSpeech);
+  if (/\b(?:mobile|phone|number|contact)\b/.test(speech)) return true;
+  return callbackPhoneDigitCandidates(userSpeech).some((candidate) => candidate.length >= 4);
 }
 
 function extractCallbackName(userSpeech: string, phone: string | null, email: string | null): string | null {
@@ -840,11 +887,17 @@ function extractCallbackName(userSpeech: string, phone: string | null, email: st
     .trim();
 
   if (!phone && !email && !/\b(?:name|i am|i'm|this is|it's|it is)\b/i.test(userSpeech)) {
-    return cleanCallerName(remainder);
+    return cleanCallerName(remainder, {
+      preferFirstName: true,
+      allowLikelyDanielFromDanielle: true,
+    });
   }
 
   const leadingName = remainder.match(/^([a-zA-Z][a-zA-Z'-]*(?:\s+[a-zA-Z][a-zA-Z'-]*){0,3})\b/)?.[1];
-  return cleanCallerName(leadingName);
+  return cleanCallerName(leadingName, {
+    preferFirstName: true,
+    allowLikelyDanielFromDanielle: true,
+  });
 }
 
 function extractCallbackReason(userSpeech: string): string | null {
@@ -884,7 +937,7 @@ function extractCallbackDetails(userSpeech: string): CallbackDetails {
   const name = extractCallbackName(userSpeech, phone, email);
   const reason = extractCallbackReason(userSpeech);
   const time = extractCallbackTime(userSpeech);
-  return { name, phone, email, reason, time };
+  return { name, phone, phoneUnclear: !phone && callbackPhoneLooksAttempted(userSpeech), email, reason, time };
 }
 
 function callbackFieldStateWithDetails(
@@ -962,6 +1015,17 @@ function callbackCorrectionQuestion(field: CallbackField): string {
   return "No worries. What's your name?";
 }
 
+function callbackUnclearMobileQuestion(state: CallbackFieldState): string {
+  const name = state.values.name;
+  return name
+    ? `Sorry ${name}, I didn't catch the full mobile number. Could you say that again for me?`
+    : "Sorry, I didn't catch the full mobile number. Could you say that again for me?";
+}
+
+function callbackReplyDelaySeconds(field: CallbackField | null): number {
+  return field === "phone" || field === "email" ? CALLBACK_CONFIRMATION_DELAY_SECONDS : 0;
+}
+
 function isAffirmativeCallbackConfirmation(userSpeech: string): boolean {
   return /\b(?:yes|yeah|yep|correct|right|that's right|that is right|sure|perfect|sounds good|all good|thanks)\b/i.test(
     userSpeech
@@ -1016,39 +1080,70 @@ function callbackQuestionForFields(
 function callbackDetailReply(
   details: CallbackDetails,
   userSpeech: string,
-  previousState: CallbackFieldState
-): { reply: string | null; state: CallbackFieldState; completed: boolean } {
+  previousState: CallbackFieldState,
+  twilioFrom: string = ""
+): { reply: string | null; state: CallbackFieldState; completed: boolean; delayBeforeReplySeconds: number } {
   if (previousState.pendingConfirm) {
     const field = previousState.pendingConfirm;
     if (isNegativeCallbackConfirmation(userSpeech)) {
       const state = callbackFieldStateWithoutValue(previousState, field);
-      return { reply: callbackCorrectionQuestion(field), state, completed: false };
+      return { reply: callbackCorrectionQuestion(field), state, completed: false, delayBeforeReplySeconds: 0 };
     }
     if (isAffirmativeCallbackConfirmation(userSpeech)) {
       let confirmedState = callbackFieldStateWithConfirmed(previousState, field);
       if (callbackLeadComplete(confirmedState)) {
-        return { reply: callbackFinalLine(confirmedState), state: confirmedState, completed: true };
+        return { reply: callbackFinalLine(confirmedState), state: confirmedState, completed: true, delayBeforeReplySeconds: 0 };
       }
       if (field === "phone" && !confirmedState.confirmed.email) {
         confirmedState = callbackFieldStateWithAsked(confirmedState, ["email"]);
-        return { reply: CALLBACK_EMAIL_ASK, state: confirmedState, completed: false };
+        return { reply: CALLBACK_EMAIL_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
       }
       if (field === "email" && !confirmedState.confirmed.reason) {
         confirmedState = callbackFieldStateWithAsked(confirmedState, ["reason"]);
-        return { reply: CALLBACK_REASON_ASK, state: confirmedState, completed: false };
+        return { reply: CALLBACK_REASON_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
       }
       if ((field === "email" || field === "reason") && !confirmedState.confirmed.time) {
         confirmedState = callbackFieldStateWithAsked(confirmedState, ["time"]);
-        return { reply: CALLBACK_TIME_ASK, state: confirmedState, completed: false };
+        return { reply: CALLBACK_TIME_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
       }
     }
   }
 
   let state = callbackFieldStateWithDetails(previousState, details);
+
+  if (!state.confirmed.phone && !state.captured.phone && details.phoneUnclear) {
+    if (!previousState.asked.phone) {
+      state = callbackFieldStateWithAsked(state, ["phone"]);
+      return {
+        reply: callbackUnclearMobileQuestion(state),
+        state,
+        completed: false,
+        delayBeforeReplySeconds: 0,
+      };
+    }
+
+    const fallbackPhone = normaliseAustralianMobile(twilioFrom);
+    if (fallbackPhone) {
+      state = callbackFieldStateWithCapturedValue(state, "phone", fallbackPhone, false);
+      state = callbackFieldStateWithPendingConfirmation(state, "phone");
+      return {
+        reply: callbackConfirmationLine("phone", state),
+        state,
+        completed: false,
+        delayBeforeReplySeconds: callbackReplyDelaySeconds("phone"),
+      };
+    }
+  }
+
   const pending = nextUnconfirmedCallbackField(state);
   if (pending) {
     state = callbackFieldStateWithPendingConfirmation(state, pending);
-    return { reply: callbackConfirmationLine(pending, state), state, completed: false };
+    return {
+      reply: callbackConfirmationLine(pending, state),
+      state,
+      completed: false,
+      delayBeforeReplySeconds: callbackReplyDelaySeconds(pending),
+    };
   }
 
   const missingNamePhone = missingCallbackNamePhoneFields(state);
@@ -1059,25 +1154,26 @@ function callbackDetailReply(
       reply: callbackQuestionForFields(missingNamePhone, previousState),
       state,
       completed: false,
+      delayBeforeReplySeconds: 0,
     };
   }
 
   if (!state.confirmed.email) {
     state = callbackFieldStateWithAsked(state, ["email"]);
-    return { reply: CALLBACK_EMAIL_ASK, state, completed: false };
+    return { reply: CALLBACK_EMAIL_ASK, state, completed: false, delayBeforeReplySeconds: 0 };
   }
 
   if (!state.confirmed.reason) {
     state = callbackFieldStateWithAsked(state, ["reason"]);
-    return { reply: CALLBACK_REASON_ASK, state, completed: false };
+    return { reply: CALLBACK_REASON_ASK, state, completed: false, delayBeforeReplySeconds: 0 };
   }
 
   if (!state.confirmed.time) {
     state = callbackFieldStateWithAsked(state, ["time"]);
-    return { reply: CALLBACK_TIME_ASK, state, completed: false };
+    return { reply: CALLBACK_TIME_ASK, state, completed: false, delayBeforeReplySeconds: 0 };
   }
 
-  return { reply: callbackFinalLine(state), state, completed: true };
+  return { reply: callbackFinalLine(state), state, completed: true, delayBeforeReplySeconds: 0 };
 }
 
 function callbackEmptySpeechRepeatLine(state: CallbackFieldState): string {
@@ -1414,7 +1510,8 @@ function buildImmediateCallbackGatherTwiML(
   processUrl: string,
   callSid: string,
   event: string,
-  callbackFieldState: CallbackFieldState
+  callbackFieldState: CallbackFieldState,
+  preReplyPauseSeconds: number = 0
 ): string {
   const vr = new twilio.twiml.VoiceResponse();
   const gatherUrl = buildProcessUrl(processUrl, {
@@ -1423,6 +1520,9 @@ function buildImmediateCallbackGatherTwiML(
     callbackFieldState,
   });
 
+  if (preReplyPauseSeconds > 0) {
+    vr.pause({ length: preReplyPauseSeconds });
+  }
   applyImmediateDirectMicahPlay(vr, reply, callSid, event);
 
   vr.gather({
@@ -1776,7 +1876,7 @@ async function handleProcess(request: Request) {
 
   if (userSpeechRaw && inCallbackMode) {
     const callbackDetails = extractCallbackDetails(userSpeechRaw);
-    const callbackOutcome = callbackDetailReply(callbackDetails, userSpeechRaw, callbackFieldState);
+    const callbackOutcome = callbackDetailReply(callbackDetails, userSpeechRaw, callbackFieldState, from);
     const callbackReply = callbackOutcome.reply;
 
     if (callbackReply) {
@@ -1833,6 +1933,8 @@ async function handleProcess(request: Request) {
         callbackConfirmed: callbackOutcome.state.confirmed,
         callbackAsked: callbackOutcome.state.asked,
         callbackCompleted: callbackOutcome.completed,
+        callbackPhoneUnclear: callbackDetails.phoneUnclear,
+        callbackNaturalDelaySeconds: callbackOutcome.delayBeforeReplySeconds,
         leadEmailAttempted: callbackOutcome.completed && callbackDetailsAreEmailable(callbackDetails, from, callbackOutcome.state),
         leadEmailSent: callbackLeadEmailSent,
         replyPreview: callbackReply,
@@ -1858,7 +1960,8 @@ async function handleProcess(request: Request) {
           processUrl,
           callSid,
           "voice_process_callback_detail_fast_path_tts",
-          callbackOutcome.state
+          callbackOutcome.state,
+          callbackOutcome.delayBeforeReplySeconds
         ),
         "[micah/voice/process] callback-detail-fast-path"
       );
