@@ -88,6 +88,34 @@ type CallbackFieldState = {
 const CALLBACK_FIELDS: CallbackField[] = ["name", "phone", "email", "reason", "time"];
 const CONFIRMABLE_CALLBACK_FIELDS = new Set<CallbackField>(["phone", "email", "time"]);
 
+function callbackStateWithConfirmedMobileGuard(state: CallbackFieldState): CallbackFieldState {
+  if (!state.confirmed.phone) return state;
+  return {
+    captured: { ...state.captured, phone: true },
+    confirmed: { ...state.confirmed, phone: true },
+    asked: { ...state.asked, phone: true },
+    values: { ...state.values },
+    pendingConfirm: state.pendingConfirm === "phone" ? null : state.pendingConfirm,
+  };
+}
+
+function logCallbackMobileAskState(
+  reason: string,
+  state: CallbackFieldState,
+  unclearRetryCount: number
+): void {
+  console.warn("[micah/voice/process] callback mobile ask state", {
+    micahVoiceQA: true,
+    event: "voice_process_callback_mobile_ask_state",
+    reason,
+    capturedMobile: state.values.phone ?? null,
+    mobileCaptured: state.captured.phone,
+    mobileConfirmed: state.confirmed.phone,
+    pendingConfirmationField: state.pendingConfirm,
+    unclearMobileRetryCount: Math.max(0, unclearRetryCount),
+  });
+}
+
 function emptyCallbackFieldFlags(): CallbackFieldFlags {
   return { name: false, phone: false, email: false, reason: false, time: false };
 }
@@ -136,13 +164,13 @@ function parseCallbackFieldState(request: Request): CallbackFieldState {
   const pendingConfirm = url.searchParams.get("callbackPendingConfirm") as CallbackField | null;
   const parsedPendingConfirm =
     pendingConfirm && CALLBACK_FIELDS.includes(pendingConfirm) ? pendingConfirm : null;
-  return {
+  return callbackStateWithConfirmedMobileGuard({
     captured: callbackFieldFlagsFromParam(url.searchParams.get("callbackCaptured")),
     confirmed: callbackFieldFlagsFromParam(url.searchParams.get("callbackConfirmed")),
     asked: callbackFieldFlagsFromParam(url.searchParams.get("callbackAsked")),
     values: callbackFieldValuesFromUrl(url),
     pendingConfirm: parsedPendingConfirm,
-  };
+  });
 }
 
 function callbackFieldStateWithAsked(
@@ -157,7 +185,7 @@ function callbackFieldStateWithAsked(
     pendingConfirm: state.pendingConfirm,
   };
   for (const field of fields) next.asked[field] = true;
-  return next;
+  return callbackStateWithConfirmedMobileGuard(next);
 }
 
 function callbackFieldStateWithCapturedValue(
@@ -166,52 +194,60 @@ function callbackFieldStateWithCapturedValue(
   value: string,
   confirmed: boolean = !CONFIRMABLE_CALLBACK_FIELDS.has(field)
 ): CallbackFieldState {
-  return {
-    captured: { ...state.captured, [field]: true },
-    confirmed: { ...state.confirmed, [field]: confirmed },
-    asked: { ...state.asked },
-    values: { ...state.values, [field]: value },
-    pendingConfirm: confirmed ? state.pendingConfirm : field,
-  };
+  const guarded = callbackStateWithConfirmedMobileGuard(state);
+  if (field === "phone" && guarded.confirmed.phone) return guarded;
+  return callbackStateWithConfirmedMobileGuard({
+    captured: { ...guarded.captured, [field]: true },
+    confirmed: { ...guarded.confirmed, [field]: confirmed },
+    asked: { ...guarded.asked },
+    values: { ...guarded.values, [field]: value },
+    pendingConfirm: confirmed ? guarded.pendingConfirm : field,
+  });
 }
 
 function callbackFieldStateWithPendingConfirmation(
   state: CallbackFieldState,
   field: CallbackField | null
 ): CallbackFieldState {
-  return {
-    captured: { ...state.captured },
-    confirmed: { ...state.confirmed },
-    asked: { ...state.asked },
-    values: { ...state.values },
+  const guarded = callbackStateWithConfirmedMobileGuard(state);
+  if (field === "phone" && guarded.confirmed.phone) {
+    return callbackStateWithConfirmedMobileGuard({ ...guarded, pendingConfirm: null });
+  }
+  return callbackStateWithConfirmedMobileGuard({
+    captured: { ...guarded.captured },
+    confirmed: { ...guarded.confirmed },
+    asked: { ...guarded.asked },
+    values: { ...guarded.values },
     pendingConfirm: field,
-  };
+  });
 }
 
 function callbackFieldStateWithConfirmed(
   state: CallbackFieldState,
   field: CallbackField
 ): CallbackFieldState {
-  return {
+  return callbackStateWithConfirmedMobileGuard({
     captured: { ...state.captured, [field]: true },
     confirmed: { ...state.confirmed, [field]: true },
     asked: { ...state.asked },
     values: { ...state.values },
     pendingConfirm: state.pendingConfirm === field ? null : state.pendingConfirm,
-  };
+  });
 }
 
 function callbackFieldStateWithoutValue(
   state: CallbackFieldState,
   field: CallbackField
 ): CallbackFieldState {
-  return {
-    captured: { ...state.captured, [field]: false },
-    confirmed: { ...state.confirmed, [field]: false },
-    asked: { ...state.asked, [field]: true },
-    values: { ...state.values, [field]: null },
-    pendingConfirm: state.pendingConfirm === field ? null : state.pendingConfirm,
-  };
+  const guarded = callbackStateWithConfirmedMobileGuard(state);
+  if (field === "phone" && guarded.confirmed.phone) return guarded;
+  return callbackStateWithConfirmedMobileGuard({
+    captured: { ...guarded.captured, [field]: false },
+    confirmed: { ...guarded.confirmed, [field]: false },
+    asked: { ...guarded.asked, [field]: true },
+    values: { ...guarded.values, [field]: null },
+    pendingConfirm: guarded.pendingConfirm === field ? null : guarded.pendingConfirm,
+  });
 }
 
 function formString(form: FormData, key: string): string {
@@ -557,13 +593,47 @@ function buildCallbackIntentBlock(requestedPerson: string): string {
 function replyIsCallbackMode(reply: string): boolean {
   const r = reply.toLowerCase();
   return (
-    // Current fast-path reply: "Sure, Jayson will call you back."
-    /(?:jayson|[a-z]+)\s+will\s+call\s+you\s+back/i.test(r) ||
-    // Legacy patterns kept for backward compat with history replay
-    /i'll let (?:jayson|[a-z]+) know to call you back/i.test(r) ||
-    /(?:jayson|[a-z]+) can (?:follow up|call you|get back to you)/i.test(r) ||
-    /take your details so (?:jayson|[a-z]+) can follow up/i.test(r)
+    // Fast-path: "Sure, Jayson will call you back."
+    /(?:jayson|jason|him|he)\s+will\s+call\s+you\s+back/i.test(r) ||
+    /i(?:'ll| will)\s+let\s+(?:jayson|jason|him)\s+ know\s+to\s+call\s+you\s+back/i.test(r) ||
+    /(?:jayson|jason|him|he)\s+can\s+(?:walk\s+you\s+through|follow\s+up|call\s+you|get\s+back\s+to\s+you)/i.test(r) ||
+    /take\s+your\s+details\s+so\s+(?:jayson|jason|him|he)\s+can\s+follow\s+up/i.test(r) ||
+    /(?:get|have)\s+(?:jayson|jason|him|he)\s+to\s+call\s+you\s+back/i.test(r) ||
+    /pass\s+(?:your\s+)?details\s+(?:on\s+)?to\s+(?:jayson|jason)/i.test(r) ||
+    /call\s+you\s+back\s+as\s+soon\s+as\s+possible/i.test(r) ||
+    /best\s+time\s+(?:for\s+(?:jayson|jason)\s+to\s+)?(?:call|contact)/i.test(r) ||
+    (/(?:can\s+i\s+|i\s+can\s+|could\s+i\s+|let\s+me\s+)?(?:grab|get|take)\s+(?:your\s+)?details/i.test(r) &&
+      /(?:call\s+(?:you\s+)?back|follow\s+up|(?:jayson|jason|him|he))/i.test(r))
   );
+}
+
+function resolveCallbackContinuationState(
+  aiReply: string,
+  alreadyInCallbackMode: boolean,
+  callbackFieldState: CallbackFieldState,
+  userSpeech?: string
+): { inCallbackMode: boolean; callbackFieldState: CallbackFieldState } {
+  const websitePricingIntent = userSpeech ? detectsWebsiteBuildPricingIntent(userSpeech) : false;
+  const replyEntersCallback = replyIsCallbackMode(aiReply);
+  const websiteForcedCallback =
+    websitePricingIntent && (replyEntersCallback || replyIsLeadCaptureAsk(aiReply));
+  const inCallbackMode = alreadyInCallbackMode || replyEntersCallback || websiteForcedCallback;
+
+  let state = callbackFieldState;
+  if (inCallbackMode && !alreadyInCallbackMode) {
+    if (websitePricingIntent && userSpeech && !state.captured.reason) {
+      state = callbackFieldStateWithCapturedValue(
+        state,
+        "reason",
+        websiteLeadReasonForSpeech(userSpeech),
+        true
+      );
+    }
+    if (!state.asked.name && !state.asked.phone) {
+      state = callbackFieldStateWithAsked(state, ["name", "phone"]);
+    }
+  }
+  return { inCallbackMode, callbackFieldState: state };
 }
 
 function replyIsLeadCaptureAsk(reply: string): boolean {
@@ -944,12 +1014,13 @@ function callbackFieldStateWithDetails(
   previous: CallbackFieldState,
   details: CallbackDetails
 ): CallbackFieldState {
+  const guardedPrevious = callbackStateWithConfirmedMobileGuard(previous);
   let next = {
-    captured: { ...previous.captured },
-    confirmed: { ...previous.confirmed },
-    asked: { ...previous.asked },
-    values: { ...previous.values },
-    pendingConfirm: previous.pendingConfirm,
+    captured: { ...guardedPrevious.captured },
+    confirmed: { ...guardedPrevious.confirmed },
+    asked: { ...guardedPrevious.asked },
+    values: { ...guardedPrevious.values },
+    pendingConfirm: guardedPrevious.pendingConfirm,
   };
 
   if (details.name && !next.confirmed.name) {
@@ -967,20 +1038,22 @@ function callbackFieldStateWithDetails(
   if (details.time && !next.confirmed.time) {
     next = callbackFieldStateWithCapturedValue(next, "time", details.time, false);
   }
-  return next;
+  return callbackStateWithConfirmedMobileGuard(next);
 }
 
 function missingCallbackNamePhoneFields(state: CallbackFieldState): CallbackField[] {
+  const guarded = callbackStateWithConfirmedMobileGuard(state);
   const missing: CallbackField[] = [];
-  if (!state.confirmed.name) missing.push("name");
-  if (!state.confirmed.phone) missing.push("phone");
+  if (!guarded.confirmed.name) missing.push("name");
+  if (!guarded.confirmed.phone) missing.push("phone");
   return missing;
 }
 
 function nextUnconfirmedCallbackField(state: CallbackFieldState): CallbackField | null {
-  if (!state.confirmed.phone && state.captured.phone) return "phone";
-  if (!state.confirmed.email && state.captured.email) return "email";
-  if (!state.confirmed.time && state.captured.time) return "time";
+  const guarded = callbackStateWithConfirmedMobileGuard(state);
+  if (!guarded.confirmed.phone && guarded.captured.phone) return "phone";
+  if (!guarded.confirmed.email && guarded.captured.email) return "email";
+  if (!guarded.confirmed.time && guarded.captured.time) return "time";
   return null;
 }
 
@@ -1042,12 +1115,12 @@ function callbackFinalLine(state: CallbackFieldState): string {
 }
 
 function callbackLeadComplete(state: CallbackFieldState): boolean {
+  const guarded = callbackStateWithConfirmedMobileGuard(state);
   return !!(
-    state.confirmed.name &&
-    state.confirmed.phone &&
-    state.confirmed.email &&
-    state.confirmed.reason &&
-    state.confirmed.time
+    guarded.confirmed.name &&
+    guarded.confirmed.phone &&
+    guarded.confirmed.email &&
+    guarded.confirmed.time
   );
 }
 
@@ -1055,21 +1128,24 @@ function callbackQuestionForFields(
   fields: CallbackField[],
   previous: CallbackFieldState
 ): string | null {
-  const alreadyAsked = fields.some((field) => previous.asked[field]);
+  const guarded = callbackStateWithConfirmedMobileGuard(previous);
+  const askableFields = fields.filter((field) => field !== "phone" || !guarded.confirmed.phone);
+  if (askableFields.length === 0) return null;
+  const alreadyAsked = askableFields.some((field) => guarded.asked[field]);
   const prefix = alreadyAsked ? "No worries." : "Thanks.";
 
-  if (fields.length === 2 && fields.includes("name") && fields.includes("phone")) {
+  if (askableFields.length === 2 && askableFields.includes("name") && askableFields.includes("phone")) {
     return alreadyAsked ? `${prefix} ${CALLBACK_NAME_MOBILE_ASK}` : CALLBACK_NAME_MOBILE_ASK;
   }
-  if (fields.length === 1 && fields[0] === "name") {
+  if (askableFields.length === 1 && askableFields[0] === "name") {
     return alreadyAsked ? "No worries. What's your name?" : CALLBACK_ONLY_PHONE_REPLY;
   }
-  if (fields.length === 1 && fields[0] === "phone") {
+  if (askableFields.length === 1 && askableFields[0] === "phone") {
     return alreadyAsked
       ? "No worries. What's the best mobile number for you?"
       : CALLBACK_ONLY_NAME_REPLY;
   }
-  if (fields.length === 1 && fields[0] === "email") {
+  if (askableFields.length === 1 && askableFields[0] === "email") {
     return alreadyAsked
       ? "No worries. What's the best email address for you?"
       : CALLBACK_EMAIL_ASK;
@@ -1083,14 +1159,16 @@ function callbackDetailReply(
   previousState: CallbackFieldState,
   twilioFrom: string = ""
 ): { reply: string | null; state: CallbackFieldState; completed: boolean; delayBeforeReplySeconds: number } {
-  if (previousState.pendingConfirm) {
-    const field = previousState.pendingConfirm;
+  const guardedPreviousState = callbackStateWithConfirmedMobileGuard(previousState);
+
+  if (guardedPreviousState.pendingConfirm) {
+    const field = guardedPreviousState.pendingConfirm;
     if (isNegativeCallbackConfirmation(userSpeech)) {
-      const state = callbackFieldStateWithoutValue(previousState, field);
+      const state = callbackFieldStateWithoutValue(guardedPreviousState, field);
       return { reply: callbackCorrectionQuestion(field), state, completed: false, delayBeforeReplySeconds: 0 };
     }
     if (isAffirmativeCallbackConfirmation(userSpeech)) {
-      let confirmedState = callbackFieldStateWithConfirmed(previousState, field);
+      let confirmedState = callbackFieldStateWithConfirmed(guardedPreviousState, field);
       if (callbackLeadComplete(confirmedState)) {
         return { reply: callbackFinalLine(confirmedState), state: confirmedState, completed: true, delayBeforeReplySeconds: 0 };
       }
@@ -1098,22 +1176,28 @@ function callbackDetailReply(
         confirmedState = callbackFieldStateWithAsked(confirmedState, ["email"]);
         return { reply: CALLBACK_EMAIL_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
       }
-      if (field === "email" && !confirmedState.confirmed.reason) {
-        confirmedState = callbackFieldStateWithAsked(confirmedState, ["reason"]);
-        return { reply: CALLBACK_REASON_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
+      if (field === "email" && !confirmedState.confirmed.time) {
+        confirmedState = callbackFieldStateWithAsked(confirmedState, ["time"]);
+        return { reply: CALLBACK_TIME_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
       }
-      if ((field === "email" || field === "reason") && !confirmedState.confirmed.time) {
+      if (field === "reason" && !confirmedState.confirmed.time) {
         confirmedState = callbackFieldStateWithAsked(confirmedState, ["time"]);
         return { reply: CALLBACK_TIME_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
       }
     }
   }
 
-  let state = callbackFieldStateWithDetails(previousState, details);
+  let state = callbackFieldStateWithDetails(guardedPreviousState, details);
 
-  if (!state.confirmed.phone && !state.captured.phone && details.phoneUnclear) {
-    if (!previousState.asked.phone) {
+  if (
+    !guardedPreviousState.confirmed.phone &&
+    !state.confirmed.phone &&
+    !state.captured.phone &&
+    details.phoneUnclear
+  ) {
+    if (!guardedPreviousState.asked.phone) {
       state = callbackFieldStateWithAsked(state, ["phone"]);
+      logCallbackMobileAskState("unclear_spoken_mobile", state, 1);
       return {
         reply: callbackUnclearMobileQuestion(state),
         state,
@@ -1126,6 +1210,7 @@ function callbackDetailReply(
     if (fallbackPhone) {
       state = callbackFieldStateWithCapturedValue(state, "phone", fallbackPhone, false);
       state = callbackFieldStateWithPendingConfirmation(state, "phone");
+      logCallbackMobileAskState("twilio_from_mobile_confirmation", state, 1);
       return {
         reply: callbackConfirmationLine("phone", state),
         state,
@@ -1138,6 +1223,9 @@ function callbackDetailReply(
   const pending = nextUnconfirmedCallbackField(state);
   if (pending) {
     state = callbackFieldStateWithPendingConfirmation(state, pending);
+    if (pending === "phone") {
+      logCallbackMobileAskState("captured_mobile_confirmation", state, 0);
+    }
     return {
       reply: callbackConfirmationLine(pending, state),
       state,
@@ -1150,8 +1238,11 @@ function callbackDetailReply(
 
   if (missingNamePhone.length > 0) {
     state = callbackFieldStateWithAsked(state, missingNamePhone);
+    if (missingNamePhone.includes("phone")) {
+      logCallbackMobileAskState("missing_mobile", state, 0);
+    }
     return {
-      reply: callbackQuestionForFields(missingNamePhone, previousState),
+      reply: callbackQuestionForFields(missingNamePhone, guardedPreviousState),
       state,
       completed: false,
       delayBeforeReplySeconds: 0,
@@ -1163,11 +1254,6 @@ function callbackDetailReply(
     return { reply: CALLBACK_EMAIL_ASK, state, completed: false, delayBeforeReplySeconds: 0 };
   }
 
-  if (!state.confirmed.reason) {
-    state = callbackFieldStateWithAsked(state, ["reason"]);
-    return { reply: CALLBACK_REASON_ASK, state, completed: false, delayBeforeReplySeconds: 0 };
-  }
-
   if (!state.confirmed.time) {
     state = callbackFieldStateWithAsked(state, ["time"]);
     return { reply: CALLBACK_TIME_ASK, state, completed: false, delayBeforeReplySeconds: 0 };
@@ -1176,17 +1262,20 @@ function callbackDetailReply(
   return { reply: callbackFinalLine(state), state, completed: true, delayBeforeReplySeconds: 0 };
 }
 
-function callbackEmptySpeechRepeatLine(state: CallbackFieldState): string {
-  const missingNamePhone = missingCallbackNamePhoneFields(state);
+function callbackEmptySpeechRepeatLine(state: CallbackFieldState, unclearRetryCount: number = 0): string {
+  const guarded = callbackStateWithConfirmedMobileGuard(state);
+  const missingNamePhone = missingCallbackNamePhoneFields(guarded);
   if (missingNamePhone.length > 0) {
-    return callbackQuestionForFields(missingNamePhone, state) ??
+    if (missingNamePhone.includes("phone")) {
+      logCallbackMobileAskState("empty_speech_missing_mobile", guarded, unclearRetryCount);
+    }
+    return callbackQuestionForFields(missingNamePhone, guarded) ??
       "No worries. What's your name and best mobile number?";
   }
-  if (!state.confirmed.email) {
+  if (!guarded.confirmed.email) {
     return "No worries. What's the best email address for you?";
   }
-  if (!state.confirmed.reason) return CALLBACK_REASON_ASK;
-  if (!state.confirmed.time) return CALLBACK_TIME_ASK;
+  if (!guarded.confirmed.time) return CALLBACK_TIME_ASK;
   return EMPTY_SPEECH_REPEAT_LINE;
 }
 
@@ -1240,7 +1329,8 @@ async function buildContinuationTwiML(
   callSid: string,
   alreadyInLeadCapture: boolean = false,
   alreadyInCallbackMode: boolean = false,
-  callbackFieldState: CallbackFieldState = emptyCallbackFieldState()
+  callbackFieldState: CallbackFieldState = emptyCallbackFieldState(),
+  userSpeech?: string
 ): Promise<string> {
   const vr = new twilio.twiml.VoiceResponse();
   const sid = callSid || `anon-${Date.now()}`;
@@ -1259,11 +1349,18 @@ async function buildContinuationTwiML(
 
   // Propagate lead-capture and callback-mode context so subsequent turns use the right fallbacks.
   const inLeadCapture = alreadyInLeadCapture || replyIsLeadCaptureAsk(aiReply);
-  const inCallbackMode = alreadyInCallbackMode || replyIsCallbackMode(aiReply);
+  const callbackContinuation = resolveCallbackContinuationState(
+    aiReply,
+    alreadyInCallbackMode,
+    callbackFieldState,
+    userSpeech
+  );
+  const inCallbackMode = callbackContinuation.inCallbackMode;
+  const nextCallbackFieldState = callbackContinuation.callbackFieldState;
   const gatherUrl = buildProcessUrl(processUrl, {
-    leadCapture: inLeadCapture,
+    leadCapture: inLeadCapture || inCallbackMode,
     callbackMode: inCallbackMode,
-    callbackFieldState: inCallbackMode ? callbackFieldState : null,
+    callbackFieldState: inCallbackMode ? nextCallbackFieldState : null,
   });
 
   vr.gather({
@@ -1311,7 +1408,7 @@ async function buildEmptySpeechTwiML(
   // Both paths use micahVoice TTS so the spoken text always matches the constant,
   // regardless of what the static MP3 file on disk contains.
   const repeatText = inCallbackMode
-    ? callbackEmptySpeechRepeatLine(callbackFieldState)
+    ? callbackEmptySpeechRepeatLine(callbackFieldState, emptySpeechCount + 1)
     : inLeadCapture
       ? LEAD_CAPTURE_REPEAT_LINE
       : EMPTY_SPEECH_REPEAT_LINE;
@@ -1661,7 +1758,15 @@ async function persistCompletedCallbackLead(params: {
   finalReply: string;
   tenantId: string | null;
 }): Promise<void> {
-  if (!params.supabase || !params.callSid) return;
+  if (!params.supabase || !params.callSid) {
+    console.warn("[micah/voice/process] callback supabase save skipped", {
+      micahVoiceQA: true,
+      event: "voice_process_callback_supabase_save_skipped",
+      CallSid: params.callSid || null,
+      reason: !params.supabase ? "no_supabase_client" : "no_call_sid",
+    });
+    return;
+  }
   const turns = callbackStateTurns(params.state, params.finalReply);
   const userText = callbackStateTranscript(params.state);
   try {
@@ -1679,16 +1784,24 @@ async function persistCompletedCallbackLead(params: {
       "supabase-save-completed-callback-lead",
       { ok: false, error: "timed out" }
     );
-    console.log("[micah/voice/process] completed callback lead persistence", {
+    console.warn("[micah/voice/process] callback supabase save result", {
       micahVoiceQA: true,
-      event: "voice_process_callback_completed_persist",
+      event: saved.ok
+        ? "voice_process_callback_supabase_save_success"
+        : "voice_process_callback_supabase_save_fail",
       CallSid: params.callSid || null,
       ok: saved.ok,
       leadId: saved.id ?? null,
       error: saved.error ?? null,
+      timedOut: saved.error === "timed out",
     });
   } catch (e) {
-    console.warn("[micah/voice/process] completed callback lead persistence threw; skipped:", e);
+    console.warn("[micah/voice/process] callback supabase save threw", {
+      micahVoiceQA: true,
+      event: "voice_process_callback_supabase_save_fail",
+      CallSid: params.callSid || null,
+      err: e instanceof Error ? e.message : String(e),
+    });
   }
 }
 
@@ -1892,6 +2005,13 @@ async function handleProcess(request: Request) {
                 null
               )
             : null;
+
+        console.warn("[micah/voice/process] callback resend attempted", {
+          micahVoiceQA: true,
+          event: "voice_process_callback_resend_attempted",
+          CallSid: callSid || null,
+        });
+
         try {
           callbackLeadEmailSent = await withTimeout(
             sendCallbackDetailLeadEmail({
@@ -1909,7 +2029,23 @@ async function handleProcess(request: Request) {
         } catch (e) {
           console.warn("[micah/voice/process] callback detail lead email threw; skipped:", e);
         }
-        await persistCompletedCallbackLead({
+
+        console.warn("[micah/voice/process] callback resend result", {
+          micahVoiceQA: true,
+          event: callbackLeadEmailSent
+            ? "voice_process_callback_resend_success"
+            : "voice_process_callback_resend_fail",
+          CallSid: callSid || null,
+          sent: callbackLeadEmailSent,
+        });
+
+        console.warn("[micah/voice/process] callback supabase save attempted", {
+          micahVoiceQA: true,
+          event: "voice_process_callback_supabase_save_attempted",
+          CallSid: callSid || null,
+        });
+
+        void persistCompletedCallbackLead({
           supabase: callbackSupabase,
           callSid,
           callerNumber: from,
@@ -2113,7 +2249,8 @@ async function handleProcess(request: Request) {
       callSid,
       inLeadCapture,
       inCallbackMode,
-      callbackFieldState
+      callbackFieldState,
+      userSpeechRaw
     );
     return twimlResponse(twiml, "[micah/voice/process] no-openai-offline-fallback");
   }
@@ -2260,6 +2397,8 @@ async function handleProcess(request: Request) {
     speechPreview: userSpeechRaw.slice(0, 200),
     scriptedCallbackReply: !!scriptedCallbackReply,
     callbackMode: inCallbackMode,
+    replyEntersCallbackMode: replyIsCallbackMode(aiReply),
+    websitePricingIntent: detectsWebsiteBuildPricingIntent(userSpeechRaw),
     openAiRequestFailed,
     capturedLead,
     leadCaptureHeuristic,
@@ -2423,7 +2562,8 @@ async function handleProcess(request: Request) {
       callSid,
       inLeadCapture,
       inCallbackMode,
-      callbackFieldState
+      callbackFieldState,
+      userSpeechRaw
     );
     return twimlResponse(twiml, "[micah/voice/process] ok");
   } catch (e) {

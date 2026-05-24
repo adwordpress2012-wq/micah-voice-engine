@@ -82,3 +82,18 @@ If a bug affects live calls, first protect the live demo questions:
 - Can you help my business get more customers?
 
 Only improve the dynamic path after the protected static path is working.
+
+## Micah Client Install SOP
+
+1. Copy `client-name-template`.
+2. Fill client profile.
+3. Add script.
+4. Add FAQs / knowledge base.
+5. Add booking rules.
+6. Add escalation / forbidden topics.
+7. Add notification email.
+8. Run local test.
+9. Deploy to Vercel.
+10. Live test call.
+11. Confirm Resend summary.
+12. Mark client ready.

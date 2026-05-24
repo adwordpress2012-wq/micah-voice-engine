@@ -119,12 +119,11 @@ export function extractLeadState(
   const has_enquiry = matchesAny(userText, ENQUIRY_PATTERNS);
   const currently_collecting_details = matchesAny(assistantText, COLLECTING_PATTERNS);
 
-  // Core required fields for a callback lead
+  // Core required fields for a callback lead (reason/enquiry type is optional metadata)
   const missing_details: string[] = [];
   if (!has_name) missing_details.push("name");
   if (!has_phone) missing_details.push("mobile number");
   if (!has_email) missing_details.push("email address");
-  if (!has_enquiry) missing_details.push("reason or enquiry type");
   if (!has_best_time) missing_details.push("best time to call");
 
   return {
