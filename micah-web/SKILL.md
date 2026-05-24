@@ -47,6 +47,25 @@ For production voice changes:
 - Preserve dynamic AI path for non-demo questions.
 - Document new static assets and why they exist.
 
+## Protected Micah Core Logic
+
+Micah Prime Directive **v1** is production-tested. Treat the following as **frozen** unless the user explicitly requests a core logic change and accepts live re-test:
+
+| Do not alter without explicit request | Location (indicative) |
+|---------------------------------------|------------------------|
+| `callbackMode` / `callbackDetailReply` state machine | `app/api/voice/process/route.ts` |
+| CallSid isolation (`callbackCallSid`, stale URL discard) | `route.ts`, `lib/micah/callback-call-session.ts` |
+| Confirmed-field guards (no repeat mobile/email asks) | `route.ts` (`callbackStateWithLockedConfirmedFields`, etc.) |
+| Immediate Resend on confirmed callback completion | `micah-lead-resend.ts`, `sendCallbackDetailLeadEmail` in `route.ts` |
+| Email speech formatting for confirmations | `formatCallbackEmailForSpeech` in `route.ts` |
+| Website build pricing → no price, callback offer | `WEBSITE_BUILD_LEAD_OFFER` fast path in `route.ts` |
+
+**Client installs** may customise: scripts, FAQs, knowledge base, booking rules, escalation rules, forbidden topics, notification email settings, and agency/owner wording — **not** the core capture/confirmation/CallSid/Resend pipeline above.
+
+**Docs:** `MICAH_PRODUCTION_MEMORY.md`, `micah-client-templates/00-core/MICAH_PRIME_DIRECTIVE.md`, `MICAH_PRODUCTION_CORE_TEMPLATE.md`.
+
+**TODO (polish only, not core):** Improve caller-name extraction so AI summary does not include trailing phrases like `Dave. My mobile number is` — do not implement unless explicitly asked.
+
 ## Lead Capture State Machine
 
 - Website build, rebuild, landing page, and website pricing questions must not quote a price. Offer a Jayson callback instead.
