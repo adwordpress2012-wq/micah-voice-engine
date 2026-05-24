@@ -4,6 +4,7 @@ import { getTenantVoiceConfig } from "@/lib/micah/tenant-config";
 import { sendCallSummaryEmail } from "@/lib/send-call-summary-email";
 import { postCallSummaryToCommandCentre } from "@/lib/command-centre";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
+import { clearMicahCallbackCallSession } from "@/lib/micah/callback-call-session";
 import type { ChatTurn } from "@/lib/voice-session";
 
 export const maxDuration = 60;
@@ -41,6 +42,13 @@ export async function POST(req: Request): Promise<Response> {
     console.warn("[micah/voice/call-status] invalid Twilio signature");
     return new NextResponse(null, { status: 403 });
   }
+
+  clearMicahCallbackCallSession(callSid);
+  console.warn("[micah/voice/call-status] callback session cleared", {
+    micahVoiceQA: true,
+    event: "voice_call_status_callback_session_cleared",
+    CallSid: callSid,
+  });
 
   const supabase = getServiceSupabaseOrNull();
   if (!supabase) {

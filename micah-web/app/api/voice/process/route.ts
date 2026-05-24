@@ -36,6 +36,11 @@ import { getServiceSupabaseOrNull } from "@/lib/supabase-server";
 import { isValidTwilioVoiceWebhook } from "@/lib/micah/twilio-webhook-auth";
 import { getTenantIdByInboundNumber } from "@/lib/micah/tenant-config";
 import { loadHistory, saveTurnToLead, type ChatTurn } from "@/lib/voice-session";
+import {
+  clearMicahCallbackCallSession,
+  setMicahCallbackCallSession,
+  type CallbackCallSessionState,
+} from "@/lib/micah/callback-call-session";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 type TwilioVR = import("twilio/lib/twiml/VoiceResponse");
@@ -164,8 +169,30 @@ function callbackFieldValuesFromUrl(url: URL): CallbackFieldValues {
   return values;
 }
 
-function parseCallbackFieldState(request: Request): CallbackFieldState {
-  const url = new URL(request.url);
+function callbackFieldStateToSession(state: CallbackFieldState): CallbackCallSessionState {
+  return {
+    captured: { ...state.captured },
+    confirmed: { ...state.confirmed },
+    asked: { ...state.asked },
+    values: { ...state.values },
+    pendingConfirm: state.pendingConfirm,
+  };
+}
+
+function urlHasCallbackStateParams(url: URL): boolean {
+  if (url.searchParams.get("callbackMode") === "1") return true;
+  if (url.searchParams.get("callbackCaptured")) return true;
+  if (url.searchParams.get("callbackConfirmed")) return true;
+  if (url.searchParams.get("callbackAsked")) return true;
+  if (url.searchParams.get("callbackPendingConfirm")) return true;
+  for (const field of CALLBACK_FIELDS) {
+    const key = `callback${field[0].toUpperCase()}${field.slice(1)}`;
+    if (url.searchParams.get(key)) return true;
+  }
+  return false;
+}
+
+function parseCallbackFieldStateFromUrl(url: URL): CallbackFieldState {
   const pendingConfirm = url.searchParams.get("callbackPendingConfirm") as CallbackField | null;
   const parsedPendingConfirm =
     pendingConfirm && CALLBACK_FIELDS.includes(pendingConfirm) ? pendingConfirm : null;
@@ -176,6 +203,98 @@ function parseCallbackFieldState(request: Request): CallbackFieldState {
     values: callbackFieldValuesFromUrl(url),
     pendingConfirm: parsedPendingConfirm,
   });
+}
+
+function logCallbackStateEvent(
+  event: string,
+  callSid: string,
+  state: CallbackFieldState,
+  extra: Record<string, unknown> = {}
+): void {
+  console.warn("[micah/voice/process] callback session state", {
+    micahVoiceQA: true,
+    event,
+    CallSid: callSid || null,
+    callbackStateSource: extra.callbackStateSource ?? null,
+    callbackCaptured: state.captured,
+    callbackConfirmed: state.confirmed,
+    callbackAsked: state.asked,
+    callbackValues: {
+      name: state.values.name ?? null,
+      phone: state.values.phone ?? null,
+      email: state.values.email ?? null,
+      reason: state.values.reason ?? null,
+      time: state.values.time ?? null,
+    },
+    pendingConfirm: state.pendingConfirm,
+    ...extra,
+  });
+}
+
+function persistCallbackFieldStateForCall(callSid: string, state: CallbackFieldState): void {
+  const sid = callSid?.trim();
+  if (!sid) return;
+  setMicahCallbackCallSession(sid, callbackFieldStateToSession(state));
+}
+
+/**
+ * Callback gather state must match Twilio CallSid. Stale URL params from a prior call are discarded.
+ */
+function resolveCallbackFieldStateForRequest(
+  request: Request,
+  callSid: string
+): CallbackFieldState {
+  const url = new URL(request.url);
+  const sid = callSid?.trim() || "";
+  const urlCallSid = url.searchParams.get("callbackCallSid")?.trim() || "";
+  const hasCallbackParams = urlHasCallbackStateParams(url);
+
+  if (!hasCallbackParams) {
+    if (sid) {
+      clearMicahCallbackCallSession(sid);
+      logCallbackStateEvent("voice_process_callback_state_initialized", sid, emptyCallbackFieldState(), {
+        callbackStateSource: "new_call_clean_url",
+      });
+    }
+    return emptyCallbackFieldState();
+  }
+
+  if (!sid || !urlCallSid || urlCallSid !== sid) {
+    if (sid) {
+      clearMicahCallbackCallSession(sid);
+    }
+    logCallbackStateEvent("voice_process_callback_state_reset", sid, emptyCallbackFieldState(), {
+      callbackStateSource: "call_sid_mismatch_or_missing",
+      urlCallSid: urlCallSid || null,
+      requestCallSid: sid || null,
+      staleUrlParamsDiscarded: true,
+    });
+    return emptyCallbackFieldState();
+  }
+
+  const fromUrl = parseCallbackFieldStateFromUrl(url);
+  persistCallbackFieldStateForCall(sid, fromUrl);
+  logCallbackStateEvent("voice_process_callback_state_loaded", sid, fromUrl, {
+    callbackStateSource: "url_validated_by_call_sid",
+  });
+  return fromUrl;
+}
+
+function resolveInCallbackModeForRequest(request: Request, callSid: string): boolean {
+  const url = new URL(request.url);
+  if (url.searchParams.get("callbackMode") !== "1") return false;
+  const sid = callSid?.trim() || "";
+  const urlCallSid = url.searchParams.get("callbackCallSid")?.trim() || "";
+  return !!(sid && urlCallSid && urlCallSid === sid);
+}
+
+function resolveCallbackRequestContext(
+  request: Request,
+  callSid: string
+): { callbackFieldState: CallbackFieldState; inCallbackMode: boolean } {
+  const callbackFieldState = resolveCallbackFieldStateForRequest(request, callSid);
+  const inCallbackMode = resolveInCallbackModeForRequest(request, callSid);
+  return { callbackFieldState, inCallbackMode };
 }
 
 function callbackFieldStateWithAsked(
@@ -304,6 +423,7 @@ function publicAudioUrl(baseUrl: string, path: string): string {
 function buildProcessUrl(
   base: string,
   opts: {
+    callSid?: string;
     leadCapture?: boolean;
     emptySpeechCount?: number;
     callbackMode?: boolean;
@@ -313,6 +433,9 @@ function buildProcessUrl(
   const url = new URL(base);
   if (opts.leadCapture) url.searchParams.set("leadCapture", "1");
   if (opts.callbackMode) url.searchParams.set("callbackMode", "1");
+  if (opts.callSid?.trim()) {
+    url.searchParams.set("callbackCallSid", opts.callSid.trim());
+  }
   if (opts.emptySpeechCount && opts.emptySpeechCount > 0) {
     url.searchParams.set("emptySpeechCount", String(opts.emptySpeechCount));
   }
@@ -344,10 +467,6 @@ function parseEmptySpeechCount(request: Request): number {
 
 function parseLeadCapture(request: Request): boolean {
   return new URL(request.url).searchParams.get("leadCapture") === "1";
-}
-
-function parseCallbackMode(request: Request): boolean {
-  return new URL(request.url).searchParams.get("callbackMode") === "1";
 }
 
 type CallbackIntentDetection = {
@@ -1476,7 +1595,11 @@ async function buildContinuationTwiML(
   );
   const inCallbackMode = callbackContinuation.inCallbackMode;
   const nextCallbackFieldState = callbackContinuation.callbackFieldState;
+  if (inCallbackMode) {
+    persistCallbackFieldStateForCall(sid, nextCallbackFieldState);
+  }
   const gatherUrl = buildProcessUrl(processUrl, {
+    callSid: sid,
     leadCapture: inLeadCapture || inCallbackMode,
     callbackMode: inCallbackMode,
     callbackFieldState: inCallbackMode ? nextCallbackFieldState : null,
@@ -1547,7 +1670,11 @@ async function buildEmptySpeechTwiML(
   });
   applyMicahVoice(vr, repeatResult);
 
+  if (inCallbackMode) {
+    persistCallbackFieldStateForCall(sid, callbackFieldState);
+  }
   const nextUrl = buildProcessUrl(processUrl, {
+    callSid: sid,
     leadCapture: inLeadCapture,
     callbackMode: inCallbackMode,
     emptySpeechCount: emptySpeechCount + 1,
@@ -1654,7 +1781,9 @@ function buildInitialCallbackIntentTwiML(
     emptyCallbackFieldState(),
     ["name", "phone"]
   );
+  persistCallbackFieldStateForCall(callSid, callbackFieldState);
   const gatherUrl = buildProcessUrl(processUrl, {
+    callSid,
     leadCapture: true,
     callbackMode: true,
     callbackFieldState,
@@ -1694,7 +1823,9 @@ function buildWebsiteLeadOfferTwiML(
     reason,
     true
   );
+  persistCallbackFieldStateForCall(callSid, callbackFieldState);
   const gatherUrl = buildProcessUrl(processUrl, {
+    callSid,
     leadCapture: true,
     callbackMode: true,
     callbackFieldState,
@@ -1730,7 +1861,9 @@ function buildImmediateCallbackGatherTwiML(
   preReplyPauseSeconds: number = 0
 ): string {
   const vr = new twilio.twiml.VoiceResponse();
+  persistCallbackFieldStateForCall(callSid, callbackFieldState);
   const gatherUrl = buildProcessUrl(processUrl, {
+    callSid,
     leadCapture: true,
     callbackMode: true,
     callbackFieldState,
@@ -1762,13 +1895,7 @@ function buildCompletedCallbackTwiML(
   callbackFieldState: CallbackFieldState
 ): string {
   const vr = new twilio.twiml.VoiceResponse();
-  const doneUrl = buildProcessUrl(processUrl, {
-    leadCapture: true,
-    callbackMode: true,
-    callbackFieldState,
-  });
-
-  void doneUrl;
+  clearMicahCallbackCallSession(callSid);
   applyImmediateDirectMicahPlay(
     vr,
     reply,
@@ -1981,8 +2108,6 @@ async function handleProcess(request: Request) {
   const processUrl = `${MICAH_PRODUCTION_VOICE_ORIGIN}/api/voice/process`;
   const emptySpeechCount = parseEmptySpeechCount(request);
   const inLeadCapture = parseLeadCapture(request);
-  const inCallbackMode = parseCallbackMode(request);
-  const callbackFieldState = parseCallbackFieldState(request);
   console.log("[micah/voice/process] incoming request", twilioRequestLogContext(request));
 
   let form: FormData;
@@ -2025,6 +2150,7 @@ async function handleProcess(request: Request) {
   );
 
   const callSid = formString(form, "CallSid");
+  const { callbackFieldState, inCallbackMode } = resolveCallbackRequestContext(request, callSid);
 
   if (!isValidTwilioVoiceWebhook(request, form)) {
     console.warn("[micah/voice/process] invalid Twilio signature", {
@@ -2110,6 +2236,20 @@ async function handleProcess(request: Request) {
     const callbackDetails = extractCallbackDetails(userSpeechRaw);
     const callbackOutcome = callbackDetailReply(callbackDetails, userSpeechRaw, callbackFieldState, from);
     const callbackReply = callbackOutcome.reply;
+
+    if (callSid) {
+      if (callbackOutcome.completed) {
+        clearMicahCallbackCallSession(callSid);
+        logCallbackStateEvent("voice_process_callback_state_cleared", callSid, emptyCallbackFieldState(), {
+          callbackStateSource: "callback_completed",
+        });
+      } else {
+        persistCallbackFieldStateForCall(callSid, callbackOutcome.state);
+        logCallbackStateEvent("voice_process_callback_state_persisted", callSid, callbackOutcome.state, {
+          callbackStateSource: "callback_detail_reply",
+        });
+      }
+    }
 
     if (callbackReply) {
       let callbackLeadEmailSent = false;

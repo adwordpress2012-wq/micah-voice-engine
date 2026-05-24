@@ -168,6 +168,47 @@ const __micahCallbackSimulation = (() => {
     "D failed: callback should complete without reason/enquiry type"
   );
 
+  // F. Cross-call — stale gather URL from call A must not leak into call B
+  const callA = "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const callB = "CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const staleUrl = new URL("https://micah.directiveos.com.au/api/voice/process");
+  staleUrl.searchParams.set("callbackMode", "1");
+  staleUrl.searchParams.set("callbackCaptured", "name,phone");
+  staleUrl.searchParams.set("callbackConfirmed", "name");
+  staleUrl.searchParams.set("callbackCallSid", callA);
+  staleUrl.searchParams.set("callbackName", "Daniel");
+  staleUrl.searchParams.set("callbackPhone", "+61434666080");
+
+  const leakedState = resolveCallbackFieldStateForRequest(
+    { url: staleUrl.toString() },
+    callB
+  );
+  assert(
+    !leakedState.captured.name && !leakedState.values.name,
+    "F failed: call B inherited Daniel from stale URL without matching CallSid"
+  );
+  assert(
+    resolveInCallbackModeForRequest({ url: staleUrl.toString() }, callB) === false,
+    "F failed: call B should not enter callbackMode from stale URL"
+  );
+
+  const freshCallB = resolveCallbackFieldStateForRequest(
+    { url: "https://micah.directiveos.com.au/api/voice/process" },
+    callB
+  );
+  const daveSpeech = "My name is Dave. My mobile number is 0432 655 123.";
+  const daveOutcome = callbackDetailReply(
+    extractCallbackDetails(daveSpeech),
+    daveSpeech,
+    callbackFieldStateWithAsked(freshCallB, ["name", "phone"]),
+    "+61432655123"
+  );
+  assert(!/Daniel/i.test(daveOutcome.reply || ""), "F failed: Dave call mentioned Daniel");
+  assert(
+    /Dave/i.test(daveOutcome.reply || "") && /0432/.test(daveOutcome.reply || ""),
+    "F failed: expected Dave mobile confirmation, got: " + daveOutcome.reply
+  );
+
   return {
     simulationA: {
       websiteOfferEntersCallbackMode: replyIsCallbackMode(WEBSITE_BUILD_LEAD_OFFER),
@@ -188,6 +229,10 @@ const __micahCallbackSimulation = (() => {
     },
     simulationD: {
       completesWithoutReason: callbackLeadComplete(noReasonState),
+    },
+    simulationF: {
+      staleUrlRejectedForCallB: !leakedState.values.name,
+      daveReply: daveOutcome.reply,
     },
   };
 })();
