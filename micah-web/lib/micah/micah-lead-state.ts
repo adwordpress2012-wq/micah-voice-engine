@@ -72,9 +72,10 @@ const BEST_TIME_PATTERNS = [
   /\b(?:best time|good time|anytime|any time)\b/i,
   /\b(?:morning|afternoon|evening|weekday|weekend)\b/i,
   /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i,
-  /\b(?:tomorrow|next week|this week|later today)\b/i,
+  /\b(?:today|tomorrow|next week|this week|later today)\b/i,
+  /\b(?:today|tomorrow)\s+at\s+\d{1,2}/i,
   /\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/i,
-  /\b(?:call me|reach me|get me)\s+(?:at|around|after|before|between|in the)\b/i,
+  /\b(?:call me|reach me|get me)\s+(?:at|around|after|before|between|in the|on)\b/i,
 ];
 
 // Micah has started asking for caller details (activates state block)

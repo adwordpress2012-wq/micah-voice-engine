@@ -72,7 +72,7 @@ const CALLBACK_TIME_ASK =
   "When is the best time for Jayson to contact you?";
 const CALLBACK_ONLY_PHONE_REPLY = "Thanks. What's your name?";
 const CALLBACK_ONLY_NAME_REPLY = "Thanks. What's the best mobile number for you?";
-const CALLBACK_CONFIRMATION_DELAY_SECONDS = 1;
+const CALLBACK_CONFIRMATION_DELAY_SECONDS = 0;
 
 type CallbackField = "name" | "phone" | "email" | "reason" | "time";
 type CallbackFieldFlags = Record<CallbackField, boolean>;
@@ -86,17 +86,22 @@ type CallbackFieldState = {
 };
 
 const CALLBACK_FIELDS: CallbackField[] = ["name", "phone", "email", "reason", "time"];
-const CONFIRMABLE_CALLBACK_FIELDS = new Set<CallbackField>(["phone", "email", "time"]);
+const CONFIRMABLE_CALLBACK_FIELDS = new Set<CallbackField>(["phone", "email"]);
+const LOCKED_WHEN_CONFIRMED_FIELDS: CallbackField[] = ["phone", "email", "time"];
 
-function callbackStateWithConfirmedMobileGuard(state: CallbackFieldState): CallbackFieldState {
-  if (!state.confirmed.phone) return state;
-  return {
-    captured: { ...state.captured, phone: true },
-    confirmed: { ...state.confirmed, phone: true },
-    asked: { ...state.asked, phone: true },
-    values: { ...state.values },
-    pendingConfirm: state.pendingConfirm === "phone" ? null : state.pendingConfirm,
-  };
+function callbackStateWithLockedConfirmedFields(state: CallbackFieldState): CallbackFieldState {
+  let next = state;
+  for (const field of LOCKED_WHEN_CONFIRMED_FIELDS) {
+    if (!next.confirmed[field]) continue;
+    next = {
+      captured: { ...next.captured, [field]: true },
+      confirmed: { ...next.confirmed, [field]: true },
+      asked: { ...next.asked, [field]: true },
+      values: { ...next.values },
+      pendingConfirm: next.pendingConfirm === field ? null : next.pendingConfirm,
+    };
+  }
+  return next;
 }
 
 function logCallbackMobileAskState(
@@ -164,7 +169,7 @@ function parseCallbackFieldState(request: Request): CallbackFieldState {
   const pendingConfirm = url.searchParams.get("callbackPendingConfirm") as CallbackField | null;
   const parsedPendingConfirm =
     pendingConfirm && CALLBACK_FIELDS.includes(pendingConfirm) ? pendingConfirm : null;
-  return callbackStateWithConfirmedMobileGuard({
+  return callbackStateWithLockedConfirmedFields({
     captured: callbackFieldFlagsFromParam(url.searchParams.get("callbackCaptured")),
     confirmed: callbackFieldFlagsFromParam(url.searchParams.get("callbackConfirmed")),
     asked: callbackFieldFlagsFromParam(url.searchParams.get("callbackAsked")),
@@ -185,7 +190,7 @@ function callbackFieldStateWithAsked(
     pendingConfirm: state.pendingConfirm,
   };
   for (const field of fields) next.asked[field] = true;
-  return callbackStateWithConfirmedMobileGuard(next);
+  return callbackStateWithLockedConfirmedFields(next);
 }
 
 function callbackFieldStateWithCapturedValue(
@@ -194,9 +199,15 @@ function callbackFieldStateWithCapturedValue(
   value: string,
   confirmed: boolean = !CONFIRMABLE_CALLBACK_FIELDS.has(field)
 ): CallbackFieldState {
-  const guarded = callbackStateWithConfirmedMobileGuard(state);
-  if (field === "phone" && guarded.confirmed.phone) return guarded;
-  return callbackStateWithConfirmedMobileGuard({
+  const guarded = callbackStateWithLockedConfirmedFields(state);
+  if (
+    (field === "phone" && guarded.confirmed.phone) ||
+    (field === "email" && guarded.confirmed.email) ||
+    (field === "time" && guarded.confirmed.time)
+  ) {
+    return guarded;
+  }
+  return callbackStateWithLockedConfirmedFields({
     captured: { ...guarded.captured, [field]: true },
     confirmed: { ...guarded.confirmed, [field]: confirmed },
     asked: { ...guarded.asked },
@@ -209,11 +220,16 @@ function callbackFieldStateWithPendingConfirmation(
   state: CallbackFieldState,
   field: CallbackField | null
 ): CallbackFieldState {
-  const guarded = callbackStateWithConfirmedMobileGuard(state);
-  if (field === "phone" && guarded.confirmed.phone) {
-    return callbackStateWithConfirmedMobileGuard({ ...guarded, pendingConfirm: null });
+  const guarded = callbackStateWithLockedConfirmedFields(state);
+  if (
+    field &&
+    ((field === "phone" && guarded.confirmed.phone) ||
+      (field === "email" && guarded.confirmed.email) ||
+      (field === "time" && guarded.confirmed.time))
+  ) {
+    return callbackStateWithLockedConfirmedFields({ ...guarded, pendingConfirm: null });
   }
-  return callbackStateWithConfirmedMobileGuard({
+  return callbackStateWithLockedConfirmedFields({
     captured: { ...guarded.captured },
     confirmed: { ...guarded.confirmed },
     asked: { ...guarded.asked },
@@ -226,7 +242,7 @@ function callbackFieldStateWithConfirmed(
   state: CallbackFieldState,
   field: CallbackField
 ): CallbackFieldState {
-  return callbackStateWithConfirmedMobileGuard({
+  return callbackStateWithLockedConfirmedFields({
     captured: { ...state.captured, [field]: true },
     confirmed: { ...state.confirmed, [field]: true },
     asked: { ...state.asked },
@@ -239,9 +255,15 @@ function callbackFieldStateWithoutValue(
   state: CallbackFieldState,
   field: CallbackField
 ): CallbackFieldState {
-  const guarded = callbackStateWithConfirmedMobileGuard(state);
-  if (field === "phone" && guarded.confirmed.phone) return guarded;
-  return callbackStateWithConfirmedMobileGuard({
+  const guarded = callbackStateWithLockedConfirmedFields(state);
+  if (
+    (field === "phone" && guarded.confirmed.phone) ||
+    (field === "email" && guarded.confirmed.email) ||
+    (field === "time" && guarded.confirmed.time)
+  ) {
+    return guarded;
+  }
+  return callbackStateWithLockedConfirmedFields({
     captured: { ...guarded.captured, [field]: false },
     confirmed: { ...guarded.confirmed, [field]: false },
     asked: { ...guarded.asked, [field]: true },
@@ -864,6 +886,29 @@ function extractCallbackEmail(userSpeech: string): string | null {
   return email ?? null;
 }
 
+function formatCallbackEmailForSpeech(email: string): string {
+  const trimmed = email.trim();
+  const at = trimmed.indexOf("@");
+  if (at <= 0 || at === trimmed.length - 1) return trimmed;
+
+  const local = trimmed.slice(0, at);
+  const domain = trimmed.slice(at + 1);
+  const domainParts = domain.split(".").filter(Boolean);
+  if (domainParts.length === 0) return trimmed;
+
+  const localLabel =
+    titleCaseName(local.replace(/[._+-]+/g, " ").trim()) ??
+    local.replace(/[._+-]+/g, " ").trim();
+  const providerLabel = titleCaseName(domainParts[0]) ?? domainParts[0];
+  const tldLabel = domainParts
+    .slice(1)
+    .map((part) => part.toLowerCase())
+    .join(" dot ");
+
+  const domainSpeech = tldLabel ? `${providerLabel} dot ${tldLabel}` : providerLabel;
+  return `${localLabel} at ${domainSpeech}`;
+}
+
 function formatCallbackPhoneForSpeech(phone: string): string {
   const auMobile = normaliseAustralianMobile(phone);
   if (auMobile) {
@@ -983,22 +1028,35 @@ function extractCallbackReason(userSpeech: string): string | null {
   return null;
 }
 
-function extractCallbackTime(userSpeech: string): string | null {
-  const direct = userSpeech.match(
-    /\b(?:best time|good time|ideal time|call me|contact me|reach me|get me|available|free)(?:\s+is|\s+would be)?\s+(?:at|around|after|before|between|in the|on)?\s*(.{3,80})/i
-  )?.[1];
-  const cleanedDirect = direct
-    ?.replace(/\b(?:if that suits|please|thanks|thank you|yes|yeah|yep)\b/gi, " ")
+function cleanCallbackTimeFragment(raw: string | null | undefined): string | null {
+  const cleaned = raw
+    ?.replace(/\b(?:if that suits|please|thanks|thank you|yes|yeah|yep|sure|perfect)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
-  if (cleanedDirect && cleanedDirect.length >= 3) {
-    return cleanedDirect.replace(/[.,;:!?]+$/g, "");
-  }
+  if (!cleaned || cleaned.length < 2) return null;
+  return cleaned.replace(/[.,;:!?]+$/g, "");
+}
 
-  const phrase = userSpeech.match(
-    /\b(this afternoon|this morning|tonight|tomorrow morning|tomorrow afternoon|tomorrow|later today|any\s*time|anytime|mornings?|afternoons?|evenings?|weekdays?|weekends?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i
+function extractCallbackTime(userSpeech: string): string | null {
+  const trimmed = userSpeech.trim();
+  if (!trimmed) return null;
+
+  const direct = trimmed.match(
+    /\b(?:best time|good time|ideal time|call me|contact me|reach me|get me|available|free)(?:\s+is|\s+would be)?\s+(?:at|around|after|before|between|in the|on)?\s*(.{3,80})/i
   )?.[1];
-  return phrase?.replace(/\s+/g, " ").trim() ?? null;
+  const cleanedDirect = cleanCallbackTimeFragment(direct);
+  if (cleanedDirect) return cleanedDirect;
+
+  const todayTomorrowAt = trimmed.match(
+    /\b((?:today|tomorrow)\s+(?:at\s+)?(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\d{1,2}\s*(?:am|pm)|this\s+(?:morning|afternoon|evening)|morning|afternoon|evening))\b/i
+  )?.[1];
+  const cleanedRelative = cleanCallbackTimeFragment(todayTomorrowAt);
+  if (cleanedRelative) return cleanedRelative;
+
+  const phrase = trimmed.match(
+    /\b(this afternoon|this morning|this evening|tonight|today|tomorrow morning|tomorrow afternoon|tomorrow|later today|any\s*time|anytime|mornings?|afternoons?|evenings?|weekdays?|weekends?|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}(?::\d{2})?\s*(?:am|pm)|\d{1,2}\s*(?:am|pm))\b/i
+  )?.[1];
+  return cleanCallbackTimeFragment(phrase);
 }
 
 function extractCallbackDetails(userSpeech: string): CallbackDetails {
@@ -1014,7 +1072,7 @@ function callbackFieldStateWithDetails(
   previous: CallbackFieldState,
   details: CallbackDetails
 ): CallbackFieldState {
-  const guardedPrevious = callbackStateWithConfirmedMobileGuard(previous);
+  const guardedPrevious = callbackStateWithLockedConfirmedFields(previous);
   let next = {
     captured: { ...guardedPrevious.captured },
     confirmed: { ...guardedPrevious.confirmed },
@@ -1036,13 +1094,13 @@ function callbackFieldStateWithDetails(
     next = callbackFieldStateWithCapturedValue(next, "email", details.email, false);
   }
   if (details.time && !next.confirmed.time) {
-    next = callbackFieldStateWithCapturedValue(next, "time", details.time, false);
+    next = callbackFieldStateWithCapturedValue(next, "time", details.time, true);
   }
-  return callbackStateWithConfirmedMobileGuard(next);
+  return callbackStateWithLockedConfirmedFields(next);
 }
 
 function missingCallbackNamePhoneFields(state: CallbackFieldState): CallbackField[] {
-  const guarded = callbackStateWithConfirmedMobileGuard(state);
+  const guarded = callbackStateWithLockedConfirmedFields(state);
   const missing: CallbackField[] = [];
   if (!guarded.confirmed.name) missing.push("name");
   if (!guarded.confirmed.phone) missing.push("phone");
@@ -1050,10 +1108,9 @@ function missingCallbackNamePhoneFields(state: CallbackFieldState): CallbackFiel
 }
 
 function nextUnconfirmedCallbackField(state: CallbackFieldState): CallbackField | null {
-  const guarded = callbackStateWithConfirmedMobileGuard(state);
+  const guarded = callbackStateWithLockedConfirmedFields(state);
   if (!guarded.confirmed.phone && guarded.captured.phone) return "phone";
   if (!guarded.confirmed.email && guarded.captured.email) return "email";
-  if (!guarded.confirmed.time && guarded.captured.time) return "time";
   return null;
 }
 
@@ -1066,7 +1123,10 @@ function callbackConfirmationLine(field: CallbackField, state: CallbackFieldStat
       : `Thanks. Just confirming, your mobile is ${phone}, is that right?`;
   }
   if (field === "email") {
-    return `Thanks. Just confirming, your email is ${state.values.email ?? "that email"}, is that right?`;
+    const emailSpeech = state.values.email
+      ? formatCallbackEmailForSpeech(state.values.email)
+      : "that email";
+    return `Thanks. Just confirming, your email is ${emailSpeech}, is that right?`;
   }
   if (field === "time") {
     const time = state.values.time ?? "that time";
@@ -1114,8 +1174,37 @@ function callbackFinalLine(state: CallbackFieldState): string {
   return `Wonderful. Nice chatting with you, ${name}. Thanks for calling DOS - we'll speak with you soon.`;
 }
 
+function buildCallbackFieldStatePromptBlock(state: CallbackFieldState): string {
+  const guarded = callbackStateWithLockedConfirmedFields(state);
+  const collected: string[] = [];
+  if (guarded.confirmed.name) collected.push("name");
+  if (guarded.confirmed.phone) collected.push("mobile number");
+  if (guarded.confirmed.email) collected.push("email address");
+  if (guarded.confirmed.time) collected.push("best callback time");
+
+  const missing: string[] = [];
+  if (!guarded.confirmed.name) missing.push("name");
+  if (!guarded.confirmed.phone) missing.push("mobile number");
+  if (!guarded.confirmed.email) missing.push("email address");
+  if (!guarded.confirmed.time) missing.push("best callback time");
+
+  const lines = ["## Callback detail state (deterministic — do not repeat collected fields)"];
+  if (collected.length > 0) {
+    lines.push(`Already confirmed this call: ${collected.join(", ")}.`);
+  }
+  if (missing.length > 0) {
+    lines.push(`Still needed: ${missing.join(", ")}.`);
+    lines.push("Ask for only one missing item. Never re-ask for anything already confirmed.");
+  } else {
+    lines.push(
+      "All callback details are confirmed. Close warmly and do not ask for name, mobile, email, or callback time again."
+    );
+  }
+  return lines.join("\n");
+}
+
 function callbackLeadComplete(state: CallbackFieldState): boolean {
-  const guarded = callbackStateWithConfirmedMobileGuard(state);
+  const guarded = callbackStateWithLockedConfirmedFields(state);
   return !!(
     guarded.confirmed.name &&
     guarded.confirmed.phone &&
@@ -1128,8 +1217,13 @@ function callbackQuestionForFields(
   fields: CallbackField[],
   previous: CallbackFieldState
 ): string | null {
-  const guarded = callbackStateWithConfirmedMobileGuard(previous);
-  const askableFields = fields.filter((field) => field !== "phone" || !guarded.confirmed.phone);
+  const guarded = callbackStateWithLockedConfirmedFields(previous);
+  const askableFields = fields.filter((field) => {
+    if (field === "phone" && guarded.confirmed.phone) return false;
+    if (field === "email" && guarded.confirmed.email) return false;
+    if (field === "time" && guarded.confirmed.time) return false;
+    return true;
+  });
   if (askableFields.length === 0) return null;
   const alreadyAsked = askableFields.some((field) => guarded.asked[field]);
   const prefix = alreadyAsked ? "No worries." : "Thanks.";
@@ -1159,10 +1253,33 @@ function callbackDetailReply(
   previousState: CallbackFieldState,
   twilioFrom: string = ""
 ): { reply: string | null; state: CallbackFieldState; completed: boolean; delayBeforeReplySeconds: number } {
-  const guardedPreviousState = callbackStateWithConfirmedMobileGuard(previousState);
+  const guardedPreviousState = callbackStateWithLockedConfirmedFields(previousState);
 
   if (guardedPreviousState.pendingConfirm) {
     const field = guardedPreviousState.pendingConfirm;
+    if (field === "email") {
+      const restatedEmail = extractCallbackEmail(userSpeech);
+      if (restatedEmail && !isNegativeCallbackConfirmation(userSpeech)) {
+        let confirmedState = callbackFieldStateWithCapturedValue(
+          guardedPreviousState,
+          "email",
+          restatedEmail,
+          true
+        );
+        if (callbackLeadComplete(confirmedState)) {
+          return {
+            reply: callbackFinalLine(confirmedState),
+            state: confirmedState,
+            completed: true,
+            delayBeforeReplySeconds: 0,
+          };
+        }
+        if (!confirmedState.confirmed.time) {
+          confirmedState = callbackFieldStateWithAsked(confirmedState, ["time"]);
+          return { reply: CALLBACK_TIME_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
+        }
+      }
+    }
     if (isNegativeCallbackConfirmation(userSpeech)) {
       const state = callbackFieldStateWithoutValue(guardedPreviousState, field);
       return { reply: callbackCorrectionQuestion(field), state, completed: false, delayBeforeReplySeconds: 0 };
@@ -1180,14 +1297,13 @@ function callbackDetailReply(
         confirmedState = callbackFieldStateWithAsked(confirmedState, ["time"]);
         return { reply: CALLBACK_TIME_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
       }
-      if (field === "reason" && !confirmedState.confirmed.time) {
-        confirmedState = callbackFieldStateWithAsked(confirmedState, ["time"]);
-        return { reply: CALLBACK_TIME_ASK, state: confirmedState, completed: false, delayBeforeReplySeconds: 0 };
-      }
     }
   }
 
   let state = callbackFieldStateWithDetails(guardedPreviousState, details);
+  if (callbackLeadComplete(state)) {
+    return { reply: callbackFinalLine(state), state, completed: true, delayBeforeReplySeconds: 0 };
+  }
 
   if (
     !guardedPreviousState.confirmed.phone &&
@@ -1241,20 +1357,23 @@ function callbackDetailReply(
     if (missingNamePhone.includes("phone")) {
       logCallbackMobileAskState("missing_mobile", state, 0);
     }
+    const namePhoneReply =
+      callbackQuestionForFields(missingNamePhone, guardedPreviousState) ??
+      CALLBACK_NAME_MOBILE_ASK;
     return {
-      reply: callbackQuestionForFields(missingNamePhone, guardedPreviousState),
+      reply: namePhoneReply,
       state,
       completed: false,
       delayBeforeReplySeconds: 0,
     };
   }
 
-  if (!state.confirmed.email) {
+  if (!state.confirmed.email && !state.captured.email) {
     state = callbackFieldStateWithAsked(state, ["email"]);
     return { reply: CALLBACK_EMAIL_ASK, state, completed: false, delayBeforeReplySeconds: 0 };
   }
 
-  if (!state.confirmed.time) {
+  if (!state.confirmed.time && !state.captured.time) {
     state = callbackFieldStateWithAsked(state, ["time"]);
     return { reply: CALLBACK_TIME_ASK, state, completed: false, delayBeforeReplySeconds: 0 };
   }
@@ -1263,7 +1382,7 @@ function callbackDetailReply(
 }
 
 function callbackEmptySpeechRepeatLine(state: CallbackFieldState, unclearRetryCount: number = 0): string {
-  const guarded = callbackStateWithConfirmedMobileGuard(state);
+  const guarded = callbackStateWithLockedConfirmedFields(state);
   const missingNamePhone = missingCallbackNamePhoneFields(guarded);
   if (missingNamePhone.length > 0) {
     if (missingNamePhone.includes("phone")) {
@@ -1963,7 +2082,7 @@ async function handleProcess(request: Request) {
   });
   // ─────────────────────────────────────────────────────────────────────────
 
-  if (initialCallbackIntent?.detected) {
+  if (initialCallbackIntent?.detected && !inCallbackMode) {
     const callbackReply = callbackFastPathReplyForName(initialCallbackIntent.detectedName);
     console.warn("[micah/voice/process] callback_intent_detected", {
       micahVoiceQA: true,
@@ -2308,6 +2427,12 @@ async function handleProcess(request: Request) {
         messages.push({
           role: "system",
           content: buildCallbackIntentBlock(currentCallbackIntent.detectedName),
+        });
+      }
+      if (inCallbackMode) {
+        messages.push({
+          role: "system",
+          content: buildCallbackFieldStatePromptBlock(callbackFieldState),
         });
       }
 

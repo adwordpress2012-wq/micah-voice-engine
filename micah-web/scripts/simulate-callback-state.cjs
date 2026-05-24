@@ -83,7 +83,8 @@ const __micahCallbackSimulation = (() => {
 
   assert(emailOutcome.state.confirmed.phone === true, "B failed: mobile confirmation was lost");
   assert(
-    emailOutcome.reply === "Thanks. Just confirming, your email is daniel@example.com, is that right?",
+    emailOutcome.reply ===
+      "Thanks. Just confirming, your email is Daniel at Example dot com, is that right?",
     "B failed: expected email confirmation next"
   );
   assert(!/mobile|phone/i.test(emailOutcome.reply || ""), "B failed: asked for phone instead of confirming email");
@@ -100,7 +101,7 @@ const __micahCallbackSimulation = (() => {
     "B failed: expected callback time after email confirmation"
   );
 
-  // C. Complete path — name + mobile + email + time → callbackCompleted
+  // C. Complete path — clear callback time locks immediately and closes
   const timeSpeech = "This afternoon.";
   const timeOutcome = callbackDetailReply(
     extractCallbackDetails(timeSpeech),
@@ -109,18 +110,41 @@ const __micahCallbackSimulation = (() => {
     twilioFrom
   );
 
-  assert(timeOutcome.state.pendingConfirm === "time", "C failed: callback time should be pending confirmation");
+  assert(timeOutcome.completed === true, "C failed: clear callback time should complete immediately");
+  assert(timeOutcome.state.confirmed.time === true, "C failed: callback time should be confirmed");
+  assert(callbackLeadComplete(timeOutcome.state), "C failed: callbackLeadComplete should be true");
+  assert(/Thanks for calling DOS/.test(timeOutcome.reply || ""), "C failed: expected natural close");
 
-  const timeYesOutcome = callbackDetailReply(
-    extractCallbackDetails("Yes."),
-    "Yes.",
-    timeOutcome.state,
+  // E. "today at 4pm" must not loop CALLBACK_TIME_ASK
+  const todayAtState = callbackFieldStateWithAsked(
+    {
+      captured: { name: true, phone: true, email: true, reason: false, time: false },
+      confirmed: { name: true, phone: true, email: true, reason: false, time: false },
+      asked: { name: true, phone: true, email: true, reason: false, time: false },
+      values: {
+        name: "Dave",
+        phone: "+61400111222",
+        email: "dave@gmail.com",
+        reason: null,
+        time: null,
+      },
+      pendingConfirm: null,
+    },
+    []
+  );
+  const todayAtSpeech = "today at 4pm";
+  const todayAtOutcome = callbackDetailReply(
+    extractCallbackDetails(todayAtSpeech),
+    todayAtSpeech,
+    todayAtState,
     twilioFrom
   );
-
-  assert(timeYesOutcome.completed === true, "C failed: completed flag should trigger save/Resend path");
-  assert(callbackLeadComplete(timeYesOutcome.state), "C failed: callbackLeadComplete should be true");
-  assert(/Thanks for calling DOS/.test(timeYesOutcome.reply || ""), "C failed: expected natural close");
+  assert(todayAtOutcome.state.confirmed.time === true, "E failed: today at 4pm should confirm time");
+  assert(todayAtOutcome.completed === true, "E failed: today at 4pm should complete callback");
+  assert(
+    todayAtOutcome.reply !== "When is the best time for Jayson to contact you?",
+    "E failed: must not repeat CALLBACK_TIME_ASK after clear time"
+  );
 
   // D. Reason missing — completion must not require reason
   const noReasonState = callbackFieldStateWithAsked(
@@ -155,8 +179,12 @@ const __micahCallbackSimulation = (() => {
       mobileConfirmed: yesOutcome.state.confirmed.phone,
     },
     simulationC: {
-      completed: timeYesOutcome.completed,
-      finalReply: timeYesOutcome.reply,
+      completed: timeOutcome.completed,
+      finalReply: timeOutcome.reply,
+    },
+    simulationE: {
+      timeConfirmed: todayAtOutcome.state.confirmed.time,
+      completed: todayAtOutcome.completed,
     },
     simulationD: {
       completesWithoutReason: callbackLeadComplete(noReasonState),
